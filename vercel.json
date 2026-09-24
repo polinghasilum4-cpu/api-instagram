@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "regions": ["cgk1"],
   "functions": {
     "api/**/*.js": {
       "memory": 1024,
