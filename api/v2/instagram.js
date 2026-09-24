@@ -1,21 +1,22 @@
-/* Instagram Downloader API — by xs0ciety
-   Auto-scrape token dari savefromins.com
-   Endpoint: GET /api/v2/instagram?url=<instagram_url>
-*/
+/* ============================================================
+ *  Instagram Downloader API — by xs0ciety
+ *  Auto-scrape token dari savefromins.com
+ *  Endpoint: GET /api/v2/instagram?url=<instagram_url>
+ * ============================================================ */
 
 const UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36";
 const BASE = "https://savefromins.com";
 
-// Cache token di memory
+// Token cache
 let cachedToken = null;
 let cachedAt = 0;
 const CACHE_TTL = 10 * 60 * 1000; // 10 menit
 
 // ============================================================
-//  SCRAPE TOKEN DARI JS BUNDLE
+//  SCRAPE TOKEN
 // ============================================================
 async function scrapeToken() {
-  console.log("[ig] Scrape token...");
+  console.log("[ig] Scrape token dari savefromins...");
   try {
     const htmlRes = await fetch(BASE + "/", {
       headers: { "user-agent": UA },
@@ -23,7 +24,6 @@ async function scrapeToken() {
     });
     const html = await htmlRes.text();
 
-    // Kumpulkan URL script
     const jsUrls = [];
     const regex = /<script[^>]+src="([^"]+)"/g;
     let m;
@@ -58,20 +58,16 @@ async function scrapeToken() {
             return match[1];
           }
         }
-      } catch (e) {
-        // skip file ini
-      }
+      } catch (e) {}
     }
   } catch (e) {
     console.warn("[ig] Scrape error:", e.message);
   }
-
-  console.log("[ig] Scrape gagal, pakai fallback");
   return null;
 }
 
 // ============================================================
-//  GET TOKEN (cache + fallback)
+//  GET TOKEN
 // ============================================================
 async function getToken(forceRefresh = false) {
   const now = Date.now();
@@ -89,7 +85,6 @@ async function getToken(forceRefresh = false) {
 
   if (cachedToken) return cachedToken;
 
-  // Fallback hardcoded
   cachedToken = "20250901majwlqo";
   cachedAt = now;
   return cachedToken;
@@ -106,15 +101,28 @@ async function parseIg(igUrl, token) {
     link: igUrl,
   });
 
+  const headers = {
+    "accept": "*/*",
+    "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+    "content-type": "application/x-www-form-urlencoded",
+    "origin": BASE,
+    "referer": BASE + "/",
+    "user-agent": UA,
+    "sec-ch-ua": '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+    "sec-ch-ua-mobile": "?1",
+    "sec-ch-ua-platform": '"Android"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "priority": "u=1, i",
+    // Spoof IP Indonesia
+    "x-forwarded-for": "103.47.132.1",
+    "x-real-ip": "103.47.132.1",
+  };
+
   const r = await fetch("https://api.savefromins.com/api/contentsite_api/media/parse", {
     method: "POST",
-    headers: {
-      "accept": "*/*",
-      "content-type": "application/x-www-form-urlencoded",
-      "origin": BASE,
-      "referer": BASE + "/",
-      "user-agent": UA,
-    },
+    headers,
     body: body.toString(),
     signal: AbortSignal.timeout(20000),
   });
@@ -149,30 +157,32 @@ module.exports = async (req, res) => {
     // Attempt 1
     let token = await getToken();
     let result = await parseIg(igUrl, token);
+    console.log(`[ig] Attempt 1: status=${result.status}, code=${result.data?.status_code}`);
 
-    // Attempt 2 — kalau gagal, refresh token & retry
+    // Attempt 2 — refresh token
     if (!result.data || result.data.status_code !== "success") {
-      console.log("[ig] Attempt 1 gagal, refresh token...");
+      console.log("[ig] Refresh token & retry...");
       token = await getToken(true);
+      await new Promise(r => setTimeout(r, 800));
       result = await parseIg(igUrl, token);
+      console.log(`[ig] Attempt 2: status=${result.status}, code=${result.data?.status_code}`);
     }
 
-    // Masih gagal
+    // Gagal
     if (!result.data || result.data.status_code !== "success") {
       return res.status(502).json({
         status: false,
-        error: result.data?.msg || "Gagal parse Instagram",
+        error: result.data?.msg || "analyze failed",
         upstream_status: result.status,
+        upstream_code: result.data?.status_code || null,
         token_used: token ? token.slice(0, 12) + "..." : null,
-        raw: result.raw || null,
       });
     }
 
-    // Success — map ke format konsisten
+    // Success
     const info = result.data.data;
     let resources = info.resources || [];
 
-    // Fallback ke info.media
     if (resources.length === 0 && Array.isArray(info.media)) {
       for (const m of info.media) {
         if (Array.isArray(m.resources)) resources.push(...m.resources);
@@ -190,7 +200,7 @@ module.exports = async (req, res) => {
       size: r.size || null,
     }));
 
-    // Sort: video duluan
+    // Video mp4 duluan
     mapped.sort((a, b) => (b.format === "mp4" ? 1 : -1));
 
     return res.status(200).json({
