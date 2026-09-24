@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "cleanUrls": true,
   "functions": {
     "api/**/*.js": {
       "memory": 1024,
