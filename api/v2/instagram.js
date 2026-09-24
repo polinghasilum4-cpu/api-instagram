@@ -193,12 +193,16 @@ module.exports = async (req, res) => {
       return res.status(404).json({ status: false, error: "Tidak ada media ditemukan" });
     }
 
-    const mapped = resources.map((r) => ({
-      download_url: r.download_url,
-      format: r.format || (r.download_url?.includes(".mp4") ? "mp4" : "jpg"),
-      quality: r.quality || null,
-      size: r.size || null,
-    }));
+    const mapped = resources
+  .filter((r) => r.download_url && r.download_url.startsWith("http"))
+  .map((r) => ({
+    download_url: r.download_url,
+    format: (r.format || "").toLowerCase() || (r.download_url.includes(".mp4") ? "mp4" : "jpg"),
+    quality: r.quality || null,
+    size: r.size || null,
+  }));
+
+// Kalau MP3 kosong URL-nya, skip. Kalau video ada, prioritaskan.
 
     // Video mp4 duluan
     mapped.sort((a, b) => (b.format === "mp4" ? 1 : -1));
