@@ -3,21 +3,20 @@
  * Catbox Upload Endpoint
  * ======================
  * POST /api/v2/catbox
- * Fix: formidable v3 named export, session prime anti-412, litterbox fallback.
+ * Formidable v3 named export. Catbox via residential proxy (CATBOX_PROXY env).
+ * Tanpa proxy → jatuh ke error jelas, bukan senyap ke litterbox.
  */
 
 const axios = require('axios');
 const FormData = require('form-data');
-const { formidable } = require('formidable');   // ← v3: named export
+const { formidable } = require('formidable');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 const fs = require('fs');
 
 const CONFIG = {
     MAX_FILE_SIZE: 200 * 1024 * 1024,
     UPLOAD_TIMEOUT: 120000,
     CATBOX_URL: 'https://catbox.moe/user/api.php',
-    LITTERBOX_URL: 'https://litterbox.catbox.moe/resources/internals/api.php',
-    LITTERBOX_EXPIRY: '72h',
-    // UA Chrome riil & terkini. Update tiap kuartal.
     UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     ACCEPTED_FIELDS: ['file', 'fileToUpload', 'image', 'upload'],
     SESSION_TTL: 5 * 60 * 1000,
@@ -32,10 +31,23 @@ const ERR = {
     UPSTREAM_TIMEOUT: 'UPSTREAM_TIMEOUT',
     UPSTREAM_ERROR: 'UPSTREAM_ERROR',
     UPSTREAM_INVALID: 'UPSTREAM_INVALID',
+    NO_PROXY: 'NO_PROXY',
     INTERNAL: 'INTERNAL',
 };
 
-// ---------- Session cache (cookie cf_clearance / session catbox) ----------
+// Proxy agent — dibangun sekali per cold start
+const PROXY_URL = process.env.CATBOX_PROXY || '';
+let proxyAgent = null;
+if (PROXY_URL) {
+    try {
+        proxyAgent = new HttpsProxyAgent(PROXY_URL);
+        console.log('[catbox] proxy aktif:', PROXY_URL.replace(/:\/\/.*@/, '://***@'));
+    } catch (e) {
+        console.warn('[catbox] proxy URL invalid:', e.message);
+    }
+}
+
+// ---------- Session cache ----------
 let sessionCookie = null;
 let sessionAt = 0;
 
@@ -44,14 +56,17 @@ async function primeCatboxSession() {
     if (sessionCookie && (now - sessionAt) < CONFIG.SESSION_TTL) return sessionCookie;
 
     try {
-        const r = await fetch('https://catbox.moe/', {
+        const opts = {
             headers: {
                 'user-agent': CONFIG.UA,
                 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'accept-language': 'en-US,en;q=0.9',
             },
-            signal: AbortSignal.timeout(8000),
-        });
+            signal: AbortSignal.timeout(10000),
+        };
+        // Node fetch gak nerima agent axios; proxy buat GET pakai dispatcher beda.
+        // Cukup andalkan POST yang pakai proxy — GET session opsional.
+        const r = await fetch('https://catbox.moe/', opts);
 
         const setCookies = typeof r.headers.getSetCookie === 'function'
             ? r.headers.getSetCookie()
@@ -104,7 +119,7 @@ function setupCors(res) {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
 }
 
-// ---------- Catbox upload (dengan cookie) ----------
+// ---------- Catbox upload (proxy-aware) ----------
 async function uploadToCatbox(filePath, filename, mimetype, userhash, cookie) {
     const fd = new FormData();
     fd.append('reqtype', 'fileupload');
@@ -121,13 +136,14 @@ async function uploadToCatbox(filePath, filename, mimetype, userhash, cookie) {
         'Origin': 'https://catbox.moe',
         'Referer': 'https://catbox.moe/',
         'User-Agent': CONFIG.UA,
+        'X-Requested-With': 'XMLHttpRequest',   // ← balik, catbox cek ini
         'Sec-Fetch-Dest': 'empty',
         'Sec-Fetch-Mode': 'cors',
         'Sec-Fetch-Site': 'same-origin',
     };
     if (cookie) headers['Cookie'] = cookie;
 
-    const res = await axios.post(CONFIG.CATBOX_URL, fd, {
+    const cfg = {
         headers,
         timeout: CONFIG.UPLOAD_TIMEOUT,
         maxBodyLength: Infinity,
@@ -135,31 +151,14 @@ async function uploadToCatbox(filePath, filename, mimetype, userhash, cookie) {
         validateStatus: () => true,
         responseType: 'text',
         transformResponse: [(d) => d],
-    });
+    };
+    if (proxyAgent) {
+        cfg.httpsAgent = proxyAgent;
+        cfg.httpAgent = proxyAgent;
+        cfg.proxy = false;   // matikan proxy axios default, biar agent yang pegang
+    }
 
-    return { status: res.status, body: String(res.data || '').trim() };
-}
-
-// ---------- Litterbox fallback (host sementara, lebih toleran) ----------
-async function uploadToLitterbox(filePath, filename, mimetype) {
-    const fd = new FormData();
-    fd.append('reqtype', 'fileupload');
-    fd.append('time', CONFIG.LITTERBOX_EXPIRY);
-    fd.append('fileToUpload', fs.createReadStream(filePath), {
-        filename,
-        contentType: mimetype || 'application/octet-stream',
-    });
-
-    const res = await axios.post(CONFIG.LITTERBOX_URL, fd, {
-        headers: { ...fd.getHeaders(), 'User-Agent': CONFIG.UA },
-        timeout: CONFIG.UPLOAD_TIMEOUT,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-        validateStatus: () => true,
-        responseType: 'text',
-        transformResponse: [(d) => d],
-    });
-
+    const res = await axios.post(CONFIG.CATBOX_URL, fd, cfg);
     return { status: res.status, body: String(res.data || '').trim() };
 }
 
@@ -171,7 +170,7 @@ module.exports = async (req, res) => {
         return sendError(res, 405, ERR.METHOD_NOT_ALLOWED, 'Hanya POST yang diizinkan');
     }
 
-    console.log('[catbox] incoming request');
+    console.log('[catbox] incoming request | proxy:', proxyAgent ? 'on' : 'off');
     let tempPath = null;
 
     try {
@@ -200,7 +199,6 @@ module.exports = async (req, res) => {
             return sendError(res, 400, ERR.NO_FILE, 'File tidak ditemukan. Kirim multipart/form-data dengan field fileToUpload.');
         }
 
-        // v3 pakai .filepath & .originalFilename
         tempPath = uploaded.filepath || uploaded.path;
         const originalName = uploaded.originalFilename || uploaded.name || 'file';
         const mimetype = uploaded.mimetype || 'application/octet-stream';
@@ -217,7 +215,6 @@ module.exports = async (req, res) => {
         const userhash = (fields.userhash && fields.userhash[0]) || '';
         console.log(`[catbox] upload "${originalName}" (${stat.size} bytes)`);
 
-        // Prime session supaya gak kena 412
         const cookie = await primeCatboxSession();
 
         let upstream;
@@ -232,9 +229,20 @@ module.exports = async (req, res) => {
 
         console.log(`[catbox] upstream status=${upstream.status} body=${upstream.body.slice(0, 150)}`);
 
-        // 412 = anti-abuse. Retry sekali dengan session fresh.
-        if (upstream.status === 412) {
-            console.log('[catbox] 412, retry dengan session baru');
+        // 412 = catbox tolak uploader. Kalau proxy gak aktif, kasih tahu jelas.
+        if (upstream.status === 412 && !proxyAgent) {
+            return sendError(
+                res,
+                412,
+                ERR.NO_PROXY,
+                'Catbox nolak IP Vercel sin1. Set CATBOX_PROXY ke residential proxy di Vercel env, redeploy.',
+                upstream.body
+            );
+        }
+
+        // 412 dengan proxy aktif = session basi. Refresh sekali.
+        if (upstream.status === 412 && proxyAgent) {
+            console.log('[catbox] 412 dengan proxy, refresh session');
             sessionCookie = null; sessionAt = 0;
             const fresh = await primeCatboxSession();
             try {
@@ -243,34 +251,18 @@ module.exports = async (req, res) => {
             } catch (_) {}
         }
 
-        // Masih gagal → litterbox fallback
-        let source = 'catbox';
-        if (upstream.status !== 200 || !/^https?:\/\//i.test(upstream.body)) {
-            console.log(`[catbox] primary gagal (${upstream.status}), coba litterbox`);
-            try {
-                const lb = await uploadToLitterbox(tempPath, originalName, mimetype);
-                if (lb.status === 200 && /^https?:\/\//i.test(lb.body)) {
-                    upstream = lb;
-                    source = 'litterbox';
-                    console.log('[catbox] litterbox OK:', lb.body);
-                }
-            } catch (e) {
-                console.warn('[catbox] litterbox gagal:', e.message);
-            }
-        }
-
         if (upstream.status !== 200) {
             return sendError(
                 res,
                 upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502,
                 ERR.UPSTREAM_ERROR,
-                `Uploader HTTP ${upstream.status}`,
+                `Catbox HTTP ${upstream.status}`,
                 upstream.body
             );
         }
 
         if (!/^https?:\/\//i.test(upstream.body)) {
-            return sendError(res, 502, ERR.UPSTREAM_INVALID, 'Uploader tidak return URL valid', upstream.body);
+            return sendError(res, 502, ERR.UPSTREAM_INVALID, 'Catbox tidak return URL valid', upstream.body);
         }
 
         return sendJSON(res, 200, {
@@ -280,8 +272,8 @@ module.exports = async (req, res) => {
                 filename: originalName,
                 size: stat.size,
                 mimetype,
-                source,
-                expires: source === 'litterbox' ? CONFIG.LITTERBOX_EXPIRY : 'Permanent',
+                source: 'catbox',
+                expires: 'Permanent',
             },
         });
 
