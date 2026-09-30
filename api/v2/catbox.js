@@ -8,7 +8,7 @@
  *   - userhash  : (optional) catbox user hash
  * 
  * Response 200:
- *   { ok: true, data: { url, filename, size, expires } }
+ *   { ok: true, data: { url, filename, size, mimetype, expires } }
  * Response 4xx/5xx:
  *   { ok: false, error: { code, message, raw? } }
  */
@@ -22,8 +22,8 @@ const fs = require('fs');
 //  CONFIG
 // ============================================================
 const CONFIG = {
-    MAX_FILE_SIZE: 200 * 1024 * 1024,       // 200 MB
-    UPLOAD_TIMEOUT: 120000,                  // 120s
+    MAX_FILE_SIZE: 200 * 1024 * 1024,
+    UPLOAD_TIMEOUT: 120000,
     CATBOX_URL: 'https://catbox.moe/user/api.php',
     UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36',
     ACCEPTED_FIELDS: ['file', 'fileToUpload', 'image', 'upload'],
@@ -60,7 +60,7 @@ function sendError(res, status, code, message, raw) {
 
 function safeUnlink(path) {
     if (!path) return;
-    try { fs.unlinkSync(path); } catch (_) { /* ignore */ }
+    try { fs.unlinkSync(path); } catch (_) {}
 }
 
 function pickUploadedFile(files) {
