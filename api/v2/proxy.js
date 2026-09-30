@@ -37,13 +37,29 @@ function isSafeUrl(urlStr) {
 }
 
 function getReferer(hostname) {
-    // Match by exact domain (not substring)
-    if (/\.fbcdn\.net$|\.facebook\.com$/.test(hostname)) return 'https://www.facebook.com/';
-    if (/\.googlevideo\.com$|\.youtube\.com$/.test(hostname)) return 'https://www.youtube.com/';
-    if (/\.cdninstagram\.com$|\.instagram\.com$/.test(hostname)) return 'https://www.instagram.com/';
+    // TikTok / TikWM — tikwm WAJIB punya referer dari domain mereka sendiri
+    if (/\.tikwm\.com$/.test(hostname)) return 'https://www.tikwm.com/';
     if (/\.tiktokcdn\.com$|\.tiktok\.com$/.test(hostname)) return 'https://www.tiktok.com/';
+
+    // Facebook
+    if (/\.fbcdn\.net$|\.facebook\.com$/.test(hostname)) return 'https://www.facebook.com/';
+
+    // YouTube
+    if (/\.googlevideo\.com$|\.youtube\.com$/.test(hostname)) return 'https://www.youtube.com/';
+
+    // Instagram
+    if (/\.cdninstagram\.com$|\.instagram\.com$/.test(hostname)) return 'https://www.instagram.com/';
+
+    // Twitter/X
     if (/\.twimg\.com$|\.twitter\.com$|\.x\.com$/.test(hostname)) return 'https://twitter.com/';
-    return 'https://www.google.com/'; // default
+
+    // SoundCloud
+    if (/\.sndcdn\.com$|\.soundcloud\.com$/.test(hostname)) return 'https://soundcloud.com/';
+
+    // Spotify
+    if (/\.scdn\.co$|\.spotify\.com$/.test(hostname)) return 'https://open.spotify.com/';
+
+    return 'https://www.google.com/';
 }
 
 function buildContentDisposition(filename) {
