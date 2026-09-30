@@ -13,11 +13,6 @@ const fs = require('fs');
 const CATBOX_API = 'https://catbox.moe/user/api.php';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
 
-module.exports.config = {
-    api: { bodyParser: false, sizeLimit: '200mb' },
-    maxDuration: 60,
-};
-
 module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -30,9 +25,8 @@ module.exports = async (req, res) => {
     const startedAt = Date.now();
 
     try {
-        // ============ PARSE MULTIPART ============
         const form = formidable({
-            maxFileSize: 200 * 1024 * 1024, // 200 MB
+            maxFileSize: 200 * 1024 * 1024,
             multiples: false,
         });
 
@@ -56,16 +50,14 @@ module.exports = async (req, res) => {
 
         console.log(`[catbox] uploading ${filename} (${(buffer.length / 1048576).toFixed(2)} MB)`);
 
-        // ============ BUILD FORM-DATA ============
         const catboxForm = new FormData();
         catboxForm.append('reqtype', 'fileupload');
-        catboxForm.append('userhash', ''); // empty = anonymous
+        catboxForm.append('userhash', '');
         catboxForm.append('fileToUpload', buffer, {
             filename: filename,
             contentType: mimetype,
         });
 
-        // ============ UPLOAD ============
         const upstream = await axios.post(CATBOX_API, catboxForm, {
             headers: {
                 ...catboxForm.getHeaders(),
@@ -90,7 +82,6 @@ module.exports = async (req, res) => {
             });
         }
 
-        // Catbox return plain text URL, contoh: "https://files.catbox.moe/abc123.jpg"
         const url = String(upstream.data).trim();
 
         if (!url.startsWith('https://files.catbox.moe/') && !url.startsWith('https://litter.catbox.moe/')) {
