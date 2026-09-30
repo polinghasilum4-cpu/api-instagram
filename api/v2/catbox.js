@@ -1,214 +1,130 @@
 /**
- * Catbox Upload Endpoint — Anti "Invalid uploader"
- * =================================================
- * Strategi: mimic browser fingerprint persis
- *  1. Fetch homepage dulu → dapet PHPSESSID
- *  2. Set WebKitFormBoundary prefix
- *  3. Selalu kirim field userhash (kosong pun gpp)
- *  4. Full browser headers
+ * Catbox Upload — Vercel Edge Runtime
+ * ====================================
+ * Runtime: edge (Cloudflare network, bukan AWS Lambda)
+ * IP-nya beda dari serverless function biasa
  */
 
-const axios = require('axios');
-const crypto = require('crypto');
+export const config = { runtime: 'edge' };
 
 const CATBOX_URL = 'https://catbox.moe/user/api.php';
-const CATBOX_HOME = 'https://catbox.moe/';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
-const MAX_SIZE = 200 * 1024 * 1024;
+const MAX_SIZE = 4 * 1024 * 1024; // Edge Function body limit 4MB
 
-function sendJSON(res, status, payload) {
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.status(status).json(payload);
-}
-function sendError(res, status, code, message, raw) {
-    const payload = { ok: false, error: { code, message } };
-    if (raw) payload.error.raw = String(raw).slice(0, 300);
-    return sendJSON(res, status, payload);
-}
-function setupCors(res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With');
-}
-function readRawBody(req) {
-    return new Promise((resolve, reject) => {
-        const chunks = [];
-        req.on('data', (c) => chunks.push(c));
-        req.on('end', () => resolve(Buffer.concat(chunks)));
-        req.on('error', reject);
-    });
-}
-
-// ============================================================
-//  STEP 1: Ambil PHPSESSID dari homepage
-// ============================================================
-async function fetchSession() {
-    try {
-        const r = await axios.get(CATBOX_HOME, {
-            headers: {
-                'User-Agent': UA,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
-                'Cache-Control': 'no-cache',
-            },
-            timeout: 10000,
-            validateStatus: () => true,
-        });
-        const setCookie = r.headers['set-cookie'] || [];
-        const phpsessid = setCookie
-            .map(c => c.match(/PHPSESSID=([^;]+)/))
-            .filter(Boolean)
-            .map(m => m[1])[0];
-        return phpsessid || null;
-    } catch (e) {
-        console.log('[catbox] session fetch failed:', e.message);
-        return null;
-    }
-}
-
-// ============================================================
-//  STEP 2: Build multipart body manual dengan WebKitFormBoundary
-// ============================================================
-function buildMultipartBody(buffer, filename, userhash, boundary) {
-    const CRLF = '\r\n';
-    const parts = [];
-
-    // Field: reqtype
-    parts.push(Buffer.from(
-        `--${boundary}${CRLF}` +
-        `Content-Disposition: form-data; name="reqtype"${CRLF}${CRLF}` +
-        `fileupload${CRLF}`
-    ));
-
-    // Field: userhash (selalu ada, walau kosong)
-    parts.push(Buffer.from(
-        `--${boundary}${CRLF}` +
-        `Content-Disposition: form-data; name="userhash"${CRLF}${CRLF}` +
-        `${userhash || ''}${CRLF}`
-    ));
-
-    // Field: fileToUpload (file)
-    const safeName = filename.replace(/[\r\n"\\]/g, '_');
-    parts.push(Buffer.from(
-        `--${boundary}${CRLF}` +
-        `Content-Disposition: form-data; name="fileToUpload"; filename="${safeName}"${CRLF}` +
-        `Content-Type: application/octet-stream${CRLF}${CRLF}`
-    ));
-    parts.push(buffer);
-    parts.push(Buffer.from(CRLF));
-
-    // Closing boundary
-    parts.push(Buffer.from(`--${boundary}--${CRLF}`));
-
-    return Buffer.concat(parts);
-}
-
-// ============================================================
-//  STEP 3: Upload
-// ============================================================
-async function uploadToCatbox(buffer, filename, userhash, phpsessid) {
-    // Boundary prefix WebKitFormBoundary (kayak browser Chrome)
-    const rand = crypto.randomBytes(8).toString('hex');
-    const boundary = `----WebKitFormBoundary${rand}`;
-
-    const body = buildMultipartBody(buffer, filename, userhash, boundary);
-
-    const headers = {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        'Content-Length': String(body.length),
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,id;q=0.7',
-        'Cache-Control': 'no-cache',
-        'Origin': 'https://catbox.moe',
-        'Referer': 'https://catbox.moe/',
-        'User-Agent': UA,
-        'X-Requested-With': 'XMLHttpRequest',
-        'sec-ch-ua': '"Chromium";v="154", "Not A(Brand";v="99", "Google Chrome";v="154"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
-        'Priority': 'u=1, i',
+function corsHeaders() {
+    return {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Filename, X-Requested-With',
     };
-
-    if (phpsessid) {
-        headers['Cookie'] = `PHPSESSID=${phpsessid}`;
-    }
-
-    const r = await axios.post(CATBOX_URL, body, {
-        headers,
-        timeout: 120000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-        validateStatus: () => true,
-        responseType: 'text',
-        transformResponse: [(d) => d],
-    });
-
-    return { status: r.status, body: String(r.data || '').trim() };
 }
 
-// ============================================================
-//  HANDLER
-// ============================================================
-module.exports = async (req, res) => {
-    setupCors(res);
+function jsonResponse(payload, status) {
+    return new Response(JSON.stringify(payload), {
+        status,
+        headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            ...corsHeaders(),
+        },
+    });
+}
 
-    if (req.method === 'OPTIONS') return res.status(204).end();
-    if (req.method !== 'POST') {
-        return sendError(res, 405, 'METHOD_NOT_ALLOWED', 'Hanya POST yang diizinkan');
+export default async function handler(request) {
+    if (request.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+    if (request.method !== 'POST') {
+        return jsonResponse({ ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: 'Hanya POST yang diizinkan' } }, 405);
     }
 
     console.log('[catbox] incoming request');
 
     try {
-        const url = new URL(req.url, 'https://x');
-        let filename = url.searchParams.get('filename') || req.headers['x-filename'] || 'file';
+        const url = new URL(request.url);
+        let filename = url.searchParams.get('filename') || request.headers.get('x-filename') || 'file';
         filename = String(filename).replace(/[^\w\-. ]/g, '_').slice(0, 100) || 'file';
 
-        const buffer = await readRawBody(req);
-        if (!buffer || buffer.length === 0) return sendError(res, 400, 'EMPTY_FILE', 'Body kosong');
-        if (buffer.length > MAX_SIZE) return sendError(res, 413, 'FILE_TOO_LARGE', `Kebesaran (${buffer.length} bytes)`);
-
-        console.log(`[catbox] file: "${filename}" (${buffer.length} bytes)`);
-
-        // 1. Ambil PHPSESSID
-        const phpsessid = await fetchSession();
-        console.log('[catbox] PHPSESSID:', phpsessid ? phpsessid.slice(0, 12) + '...' : 'none');
-
-        // 2. Upload dengan userhash kosong + cookie
-        const userhash = url.searchParams.get('userhash') || '';
-
-        let upstream;
-        try {
-            upstream = await uploadToCatbox(buffer, filename, userhash, phpsessid);
-        } catch (e) {
-            if (e.code === 'ECONNABORTED') return sendError(res, 504, 'UPSTREAM_TIMEOUT', 'Timeout upload ke Catbox');
-            return sendError(res, 502, 'UPSTREAM_ERROR', e.message || 'Koneksi ke Catbox gagal');
+        const bodyBuffer = await request.arrayBuffer();
+        if (!bodyBuffer || bodyBuffer.byteLength === 0) {
+            return jsonResponse({ ok: false, error: { code: 'EMPTY_FILE', message: 'Body kosong' } }, 400);
+        }
+        if (bodyBuffer.byteLength > MAX_SIZE) {
+            return jsonResponse({ ok: false, error: { code: 'FILE_TOO_LARGE', message: `Kebesaran (${bodyBuffer.byteLength} bytes, max ${MAX_SIZE})` } }, 413);
         }
 
-        console.log(`[catbox] upstream status=${upstream.status} body=${upstream.body.slice(0, 150)}`);
+        console.log(`[catbox] ${filename} (${bodyBuffer.byteLength} bytes)`);
 
-        if (upstream.status !== 200) {
-            return sendError(res, upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502, 'UPSTREAM_ERROR', `Catbox HTTP ${upstream.status}`, upstream.body);
-        }
-        if (!/^https?:\/\//i.test(upstream.body)) {
-            return sendError(res, 502, 'UPSTREAM_INVALID', 'Catbox tidak return URL valid', upstream.body);
-        }
+        // Build multipart manual (Web API)
+        const boundary = '----WebKitFormBoundary' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+        const CRLF = '\r\n';
+        const encoder = new TextEncoder();
+        const safeName = filename.replace(/[\r\n"\\]/g, '_');
 
-        return sendJSON(res, 200, {
-            ok: true,
-            data: {
-                url: upstream.body,
-                filename,
-                size: buffer.length,
-                expires: 'Permanent',
+        const head = encoder.encode(
+            `--${boundary}${CRLF}` +
+            `Content-Disposition: form-data; name="reqtype"${CRLF}${CRLF}` +
+            `fileupload${CRLF}` +
+            `--${boundary}${CRLF}` +
+            `Content-Disposition: form-data; name="userhash"${CRLF}${CRLF}${CRLF}` +
+            `--${boundary}${CRLF}` +
+            `Content-Disposition: form-data; name="fileToUpload"; filename="${safeName}"${CRLF}` +
+            `Content-Type: application/octet-stream${CRLF}${CRLF}`
+        );
+        const tail = encoder.encode(`${CRLF}--${boundary}--${CRLF}`);
+
+        const full = new Uint8Array(head.byteLength + bodyBuffer.byteLength + tail.byteLength);
+        full.set(head, 0);
+        full.set(new Uint8Array(bodyBuffer), head.byteLength);
+        full.set(tail, head.byteLength + bodyBuffer.byteLength);
+
+        const catRes = await fetch(CATBOX_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,id;q=0.7',
+                'Cache-Control': 'no-cache',
+                'Origin': 'https://catbox.moe',
+                'Referer': 'https://catbox.moe/',
+                'User-Agent': UA,
+                'X-Requested-With': 'XMLHttpRequest',
             },
+            body: full,
         });
 
+        const text = (await catRes.text()).trim();
+        console.log(`[catbox] upstream ${catRes.status} ${text.slice(0, 150)}`);
+
+        if (catRes.status !== 200) {
+            return jsonResponse({
+                ok: false,
+                error: {
+                    code: 'UPSTREAM_ERROR',
+                    message: `Catbox HTTP ${catRes.status}`,
+                    raw: text.slice(0, 300),
+                },
+            }, catRes.status >= 400 && catRes.status < 500 ? catRes.status : 502);
+        }
+
+        if (!/^https?:\/\//i.test(text)) {
+            return jsonResponse({
+                ok: false,
+                error: { code: 'UPSTREAM_INVALID', message: 'Catbox tidak return URL valid', raw: text.slice(0, 300) },
+            }, 502);
+        }
+
+        return jsonResponse({
+            ok: true,
+            data: {
+                url: text,
+                filename,
+                size: bodyBuffer.byteLength,
+                expires: 'Permanent',
+            },
+        }, 200);
+
     } catch (err) {
-        console.error('[catbox] fatal:', err.message, err.stack);
-        return sendError(res, 500, 'INTERNAL', err.message || 'Internal server error');
+        console.error('[catbox] fatal:', err.message);
+        return jsonResponse({ ok: false, error: { code: 'INTERNAL', message: err.message || 'Internal error' } }, 500);
     }
-};
+            }
