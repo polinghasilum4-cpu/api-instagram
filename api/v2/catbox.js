@@ -1,9 +1,14 @@
 // language: JavaScript (Node 20, Vercel), file: api/v2/catbox.js
-// Drops in over your existing handler. Same exports shape.
+/**
+ * Catbox Upload Endpoint
+ * ======================
+ * POST /api/v2/catbox
+ * Fix: formidable v3 named export, session prime anti-412, litterbox fallback.
+ */
 
 const axios = require('axios');
 const FormData = require('form-data');
-const formidable = require('formidable');
+const { formidable } = require('formidable');   // ← v3: named export
 const fs = require('fs');
 
 const CONFIG = {
@@ -12,7 +17,7 @@ const CONFIG = {
     CATBOX_URL: 'https://catbox.moe/user/api.php',
     LITTERBOX_URL: 'https://litterbox.catbox.moe/resources/internals/api.php',
     LITTERBOX_EXPIRY: '72h',
-    // Real, current Chrome. Update quarterly.
+    // UA Chrome riil & terkini. Update tiap kuartal.
     UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     ACCEPTED_FIELDS: ['file', 'fileToUpload', 'image', 'upload'],
     SESSION_TTL: 5 * 60 * 1000,
@@ -30,7 +35,7 @@ const ERR = {
     INTERNAL: 'INTERNAL',
 };
 
-// ---------- Session cache ----------
+// ---------- Session cache (cookie cf_clearance / session catbox) ----------
 let sessionCookie = null;
 let sessionAt = 0;
 
@@ -48,7 +53,6 @@ async function primeCatboxSession() {
             signal: AbortSignal.timeout(8000),
         });
 
-        // Node 20 fetch exposes getSetCookie()
         const setCookies = typeof r.headers.getSetCookie === 'function'
             ? r.headers.getSetCookie()
             : [r.headers.get('set-cookie')].filter(Boolean);
@@ -59,15 +63,15 @@ async function primeCatboxSession() {
             .join('; ');
 
         sessionAt = now;
-        console.log('[catbox] session primed:', sessionCookie.slice(0, 60) || '(none)');
+        console.log('[catbox] session primed:', sessionCookie.slice(0, 80) || '(kosong)');
     } catch (e) {
-        console.warn('[catbox] prime failed:', e.message);
+        console.warn('[catbox] prime gagal:', e.message);
         sessionCookie = null;
     }
     return sessionCookie;
 }
 
-// ---------- helpers ----------
+// ---------- Helpers ----------
 function sendJSON(res, status, payload) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.status(status).json(payload);
@@ -100,7 +104,7 @@ function setupCors(res) {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
 }
 
-// ---------- catbox upload (with cookie) ----------
+// ---------- Catbox upload (dengan cookie) ----------
 async function uploadToCatbox(filePath, filename, mimetype, userhash, cookie) {
     const fd = new FormData();
     fd.append('reqtype', 'fileupload');
@@ -136,7 +140,7 @@ async function uploadToCatbox(filePath, filename, mimetype, userhash, cookie) {
     return { status: res.status, body: String(res.data || '').trim() };
 }
 
-// ---------- litterbox fallback ----------
+// ---------- Litterbox fallback (host sementara, lebih toleran) ----------
 async function uploadToLitterbox(filePath, filename, mimetype) {
     const fd = new FormData();
     fd.append('reqtype', 'fileupload');
@@ -159,7 +163,7 @@ async function uploadToLitterbox(filePath, filename, mimetype) {
     return { status: res.status, body: String(res.data || '').trim() };
 }
 
-// ---------- handler ----------
+// ---------- Handler ----------
 module.exports = async (req, res) => {
     setupCors(res);
     if (req.method === 'OPTIONS') return res.status(204).end();
@@ -167,7 +171,9 @@ module.exports = async (req, res) => {
         return sendError(res, 405, ERR.METHOD_NOT_ALLOWED, 'Hanya POST yang diizinkan');
     }
 
+    console.log('[catbox] incoming request');
     let tempPath = null;
+
     try {
         const form = formidable({
             maxFileSize: CONFIG.MAX_FILE_SIZE,
@@ -190,8 +196,11 @@ module.exports = async (req, res) => {
         }
 
         const uploaded = pickUploadedFile(files);
-        if (!uploaded) return sendError(res, 400, ERR.NO_FILE, 'File tidak ditemukan. Kirim multipart/form-data dengan field fileToUpload.');
+        if (!uploaded) {
+            return sendError(res, 400, ERR.NO_FILE, 'File tidak ditemukan. Kirim multipart/form-data dengan field fileToUpload.');
+        }
 
+        // v3 pakai .filepath & .originalFilename
         tempPath = uploaded.filepath || uploaded.path;
         const originalName = uploaded.originalFilename || uploaded.name || 'file';
         const mimetype = uploaded.mimetype || 'application/octet-stream';
@@ -206,37 +215,48 @@ module.exports = async (req, res) => {
         }
 
         const userhash = (fields.userhash && fields.userhash[0]) || '';
+        console.log(`[catbox] upload "${originalName}" (${stat.size} bytes)`);
+
+        // Prime session supaya gak kena 412
         const cookie = await primeCatboxSession();
 
         let upstream;
         try {
             upstream = await uploadToCatbox(tempPath, originalName, mimetype, userhash, cookie);
         } catch (e) {
-            if (e.code === 'ECONNABORTED') return sendError(res, 504, ERR.UPSTREAM_TIMEOUT, 'Timeout upload ke Catbox');
+            if (e.code === 'ECONNABORTED') {
+                return sendError(res, 504, ERR.UPSTREAM_TIMEOUT, 'Timeout upload ke Catbox');
+            }
             return sendError(res, 502, ERR.UPSTREAM_ERROR, e.message || 'Koneksi ke Catbox gagal');
         }
 
-        // 412 = anti-abuse. Retry once with a fresh session.
+        console.log(`[catbox] upstream status=${upstream.status} body=${upstream.body.slice(0, 150)}`);
+
+        // 412 = anti-abuse. Retry sekali dengan session fresh.
         if (upstream.status === 412) {
-            console.log('[catbox] 412, retrying with fresh session');
+            console.log('[catbox] 412, retry dengan session baru');
             sessionCookie = null; sessionAt = 0;
             const fresh = await primeCatboxSession();
             try {
                 upstream = await uploadToCatbox(tempPath, originalName, mimetype, userhash, fresh);
+                console.log(`[catbox] retry status=${upstream.status}`);
             } catch (_) {}
         }
 
-        // Still failing on catbox → litterbox fallback (temporary host, less strict)
+        // Masih gagal → litterbox fallback
         let source = 'catbox';
         if (upstream.status !== 200 || !/^https?:\/\//i.test(upstream.body)) {
-            console.log(`[catbox] primary failed (${upstream.status}), trying litterbox`);
+            console.log(`[catbox] primary gagal (${upstream.status}), coba litterbox`);
             try {
                 const lb = await uploadToLitterbox(tempPath, originalName, mimetype);
                 if (lb.status === 200 && /^https?:\/\//i.test(lb.body)) {
                     upstream = lb;
                     source = 'litterbox';
+                    console.log('[catbox] litterbox OK:', lb.body);
                 }
-            } catch (_) {}
+            } catch (e) {
+                console.warn('[catbox] litterbox gagal:', e.message);
+            }
         }
 
         if (upstream.status !== 200) {
@@ -266,7 +286,7 @@ module.exports = async (req, res) => {
         });
 
     } catch (err) {
-        console.error('[catbox] fatal:', err.message);
+        console.error('[catbox] fatal:', err.message, err.stack);
         return sendError(res, 500, ERR.INTERNAL, err.message || 'Internal server error');
     } finally {
         safeUnlink(tempPath);
