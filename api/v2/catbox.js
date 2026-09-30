@@ -1,114 +1,145 @@
-/* ============================================================
-   api/v2/catbox.js — Upload ke catbox.moe
-   Endpoint: POST /api/v2/catbox
-   Body    : multipart/form-data (field "file")
-   Response: { success: true, url: "https://files.catbox.moe/..." }
-   ============================================================ */
+/**
+ * Catbox Upload Endpoint — Vercel Serverless
+ * ==========================================
+ * POST /api/v2/catbox
+ * Body (multipart/form-data):
+ *   - file      : File (max 200MB)
+ *   - userhash  : (optional) catbox user hash
+ * Response: { success: true, url, filename, size }
+ */
 
 const axios = require('axios');
 const FormData = require('form-data');
-const { formidable } = require('formidable');
+const formidable = require('formidable');
 const fs = require('fs');
 
-const CATBOX_API = 'https://catbox.moe/user/api.php';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
-
 module.exports = async (req, res) => {
+    // ============ CORS ============
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    if (req.method === 'OPTIONS') return res.status(204).end();
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+
+    if (req.method === 'OPTIONS') return res.status(200).end();
     if (req.method !== 'POST') {
-        return res.status(405).json({ success: false, error: 'POST only' });
+        return res.status(405).json({ success: false, error: 'Method not allowed' });
     }
 
-    const startedAt = Date.now();
+    console.log('[catbox] request received');
 
     try {
+        // ============ PARSE MULTIPART ============
         const form = formidable({
             maxFileSize: 200 * 1024 * 1024,
             multiples: false,
+            allowEmptyFiles: false,
+            keepExtensions: true,
         });
 
-        const { files } = await new Promise((resolve, reject) => {
-            form.parse(req, (err, fields, files) => {
-                if (err) return reject(err);
-                resolve({ fields, files });
-            });
-        });
+        const [fields, files] = await form.parse(req);
 
-        const fileField = files.file || files.upload || files.fileToUpload;
-        const file = Array.isArray(fileField) ? fileField[0] : fileField;
+        // Cari file di beberapa field name yang mungkin
+        const fileField = files.file || files.fileToUpload || files.image || files.upload;
+        const uploadedFile = Array.isArray(fileField) ? fileField[0] : fileField;
 
-        if (!file) {
-            return res.status(400).json({ success: false, error: 'Field "file" wajib' });
+        if (!uploadedFile) {
+            return res.status(400).json({ success: false, error: 'File tidak ditemukan' });
         }
 
-        const buffer = fs.readFileSync(file.filepath);
-        const filename = file.originalFilename || 'upload.bin';
-        const mimetype = file.mimetype || 'application/octet-stream';
+        const filePath = uploadedFile.filepath || uploadedFile.path;
+        const originalName = uploadedFile.originalFilename || uploadedFile.name || 'file';
 
-        console.log(`[catbox] uploading ${filename} (${(buffer.length / 1048576).toFixed(2)} MB)`);
+        const stat = fs.statSync(filePath);
+        console.log(`[catbox] file: ${originalName}, size: ${stat.size} bytes`);
 
-        const catboxForm = new FormData();
-        catboxForm.append('reqtype', 'fileupload');
-        catboxForm.append('userhash', '');
-        catboxForm.append('fileToUpload', buffer, {
-            filename: filename,
-            contentType: mimetype,
+        if (stat.size === 0) {
+            try { fs.unlinkSync(filePath); } catch (e) {}
+            return res.status(400).json({ success: false, error: 'File kosong' });
+        }
+
+        if (stat.size > 200 * 1024 * 1024) {
+            try { fs.unlinkSync(filePath); } catch (e) {}
+            return res.status(413).json({ success: false, error: 'File terlalu besar (>200MB)' });
+        }
+
+        // Userhash optional
+        const userhash = (fields.userhash && fields.userhash[0]) || '';
+
+        // ============ BUILD FORMDATA ============
+        const formData = new FormData();
+        formData.append('reqtype', 'fileupload');
+        if (userhash) formData.append('userhash', userhash);
+        formData.append('fileToUpload', fs.createReadStream(filePath), {
+            filename: originalName,
+            contentType: uploadedFile.mimetype || 'application/octet-stream',
         });
 
-        const upstream = await axios.post(CATBOX_API, catboxForm, {
+        // ============ UPLOAD KE CATBOX ============
+        console.log('[catbox] uploading...');
+
+        const upstream = await axios.post('https://catbox.moe/user/api.php', formData, {
             headers: {
-                ...catboxForm.getHeaders(),
-                'user-agent': UA,
-                'origin': 'https://catbox.moe',
-                'referer': 'https://catbox.moe/',
-                'accept': '*/*',
+                ...formData.getHeaders(),
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,id;q=0.7',
+                'Cache-Control': 'no-cache',
+                'Origin': 'https://catbox.moe',
+                'Referer': 'https://catbox.moe/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36',
+                'X-Requested-With': 'XMLHttpRequest',
             },
+            timeout: 120000,
             maxBodyLength: Infinity,
             maxContentLength: Infinity,
-            timeout: 55000,
             validateStatus: () => true,
+            responseType: 'text',
+            transformResponse: [(d) => d],   // jangan auto-parse
         });
 
-        console.log('[catbox] upstream HTTP', upstream.status);
+        // Cleanup temp
+        try { fs.unlinkSync(filePath); } catch (e) {}
 
+        const resultText = String(upstream.data || '').trim();
+        console.log(`[catbox] status=${upstream.status} body=${resultText.slice(0, 200)}`);
+
+        // Catbox return plain text URL atau pesan error
         if (upstream.status !== 200) {
             return res.status(upstream.status).json({
                 success: false,
-                error: `catbox HTTP ${upstream.status}`,
-                raw: String(upstream.data).slice(0, 200),
+                error: `Catbox HTTP ${upstream.status}`,
+                raw: resultText.slice(0, 300),
             });
         }
 
-        const url = String(upstream.data).trim();
-
-        if (!url.startsWith('https://files.catbox.moe/') && !url.startsWith('https://litter.catbox.moe/')) {
+        if (!resultText.startsWith('http')) {
             return res.status(502).json({
                 success: false,
-                error: 'Response bukan URL catbox',
-                raw: url.slice(0, 200),
+                error: 'Catbox return invalid response',
+                raw: resultText.slice(0, 300),
             });
         }
 
-        const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-
+        // ============ SUCCESS ============
         return res.status(200).json({
             success: true,
-            url: url,
-            filename: filename,
-            size: buffer.length,
-            elapsed: parseFloat(elapsed),
+            url: resultText,
+            filename: originalName,
+            size: stat.size,
+            expires: 'Permanent',
         });
 
     } catch (err) {
         console.error('[catbox] error:', err.message);
-        const isTimeout = err.code === 'ECONNABORTED';
-        return res.status(isTimeout ? 504 : 500).json({
+
+        if (err.code === 'ETOOBIG' || err.message?.includes('maxFileSize')) {
+            return res.status(413).json({ success: false, error: 'File terlalu besar (>200MB)' });
+        }
+        if (err.code === 'ECONNABORTED') {
+            return res.status(504).json({ success: false, error: 'Timeout upload ke Catbox' });
+        }
+
+        return res.status(500).json({
             success: false,
-            error: isTimeout ? 'Timeout (55s)' : err.message,
-            elapsed: parseFloat(((Date.now() - startedAt) / 1000).toFixed(1)),
+            error: err.message || 'Upload gagal',
         });
     }
 };
