@@ -1,12 +1,5 @@
 {
   "version": 2,
-  "regions": ["sin1"],
-  "functions": {
-    "api/**/*.js": {
-      "memory": 1024,
-      "maxDuration": 60
-    }
-  },
   "headers": [
     {
       "source": "/api/(.*)",
