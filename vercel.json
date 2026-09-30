@@ -3,10 +3,6 @@
   "regions": ["sin1"],
   "functions": {
     "api/**/*.js": {
-      "memory": 512,
-      "maxDuration": 10
-    },
-    "api/v2/catbox.js": {
       "memory": 1024,
       "maxDuration": 60
     },
@@ -15,12 +11,6 @@
       "maxDuration": 60
     }
   },
-  "rewrites": [
-    {
-      "source": "/api/v2/catbox",
-      "destination": "/api/v2/catbox.js"
-    }
-  ],
   "headers": [
     {
       "source": "/api/(.*)",
