@@ -9,6 +9,10 @@
     "api/v2/catbox.js": {
       "memory": 1024,
       "maxDuration": 60
+    },
+    "api/v2/proxy.js": {
+      "memory": 1024,
+      "maxDuration": 60
     }
   },
   "rewrites": [
@@ -23,7 +27,7 @@
       "headers": [
         { "key": "Access-Control-Allow-Origin", "value": "*" },
         { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "Content-Type" }
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, X-Requested-With" }
       ]
     }
   ]
