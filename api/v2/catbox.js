@@ -2,15 +2,6 @@
  * Catbox Upload Endpoint — Refactored
  * ====================================
  * POST /api/v2/catbox
- * 
- * Body (multipart/form-data):
- *   - file      : File (max 200MB) [field: "file" | "fileToUpload" | "image"]
- *   - userhash  : (optional) catbox user hash
- * 
- * Response 200:
- *   { ok: true, data: { url, filename, size, mimetype, expires } }
- * Response 4xx/5xx:
- *   { ok: false, error: { code, message, raw? } }
  */
 
 const axios = require('axios');
@@ -18,9 +9,6 @@ const FormData = require('form-data');
 const formidable = require('formidable');
 const fs = require('fs');
 
-// ============================================================
-//  CONFIG
-// ============================================================
 const CONFIG = {
     MAX_FILE_SIZE: 200 * 1024 * 1024,
     UPLOAD_TIMEOUT: 120000,
@@ -29,9 +17,6 @@ const CONFIG = {
     ACCEPTED_FIELDS: ['file', 'fileToUpload', 'image', 'upload'],
 };
 
-// ============================================================
-//  ERROR CODES
-// ============================================================
 const ERR = {
     METHOD_NOT_ALLOWED: 'METHOD_NOT_ALLOWED',
     NO_FILE: 'NO_FILE',
@@ -44,9 +29,6 @@ const ERR = {
     INTERNAL: 'INTERNAL',
 };
 
-// ============================================================
-//  HELPERS
-// ============================================================
 function sendJSON(res, status, payload) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.status(status).json(payload);
@@ -58,9 +40,9 @@ function sendError(res, status, code, message, raw) {
     return sendJSON(res, status, payload);
 }
 
-function safeUnlink(path) {
-    if (!path) return;
-    try { fs.unlinkSync(path); } catch (_) {}
+function safeUnlink(p) {
+    if (!p) return;
+    try { fs.unlinkSync(p); } catch (_) {}
 }
 
 function pickUploadedFile(files) {
@@ -79,9 +61,6 @@ function setupCors(res) {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
 }
 
-// ============================================================
-//  CATBOX UPLOADER
-// ============================================================
 async function uploadToCatbox(filePath, filename, mimetype, userhash) {
     const fd = new FormData();
     fd.append('reqtype', 'fileupload');
@@ -110,15 +89,9 @@ async function uploadToCatbox(filePath, filename, mimetype, userhash) {
         transformResponse: [(d) => d],
     });
 
-    return {
-        status: res.status,
-        body: String(res.data || '').trim(),
-    };
+    return { status: res.status, body: String(res.data || '').trim() };
 }
 
-// ============================================================
-//  MAIN HANDLER
-// ============================================================
 module.exports = async (req, res) => {
     setupCors(res);
 
@@ -128,11 +101,9 @@ module.exports = async (req, res) => {
     }
 
     console.log('[catbox] incoming request');
-
     let tempPath = null;
 
     try {
-        // ---------- PARSE MULTIPART ----------
         const form = formidable({
             maxFileSize: CONFIG.MAX_FILE_SIZE,
             multiples: false,
@@ -153,49 +124,35 @@ module.exports = async (req, res) => {
             );
         }
 
-        // ---------- VALIDATE FILE ----------
         const uploaded = pickUploadedFile(files);
-        if (!uploaded) {
-            return sendError(res, 400, ERR.NO_FILE, 'File tidak ditemukan di request');
-        }
+        if (!uploaded) return sendError(res, 400, ERR.NO_FILE, 'File tidak ditemukan di request');
 
         tempPath = uploaded.filepath || uploaded.path;
         const originalName = uploaded.originalFilename || uploaded.name || 'file';
         const mimetype = uploaded.mimetype || 'application/octet-stream';
 
         let stat;
-        try {
-            stat = fs.statSync(tempPath);
-        } catch (e) {
-            return sendError(res, 400, ERR.PARSE_ERROR, 'File temp tidak bisa dibaca');
-        }
+        try { stat = fs.statSync(tempPath); }
+        catch (e) { return sendError(res, 400, ERR.PARSE_ERROR, 'File temp tidak bisa dibaca'); }
 
-        if (stat.size === 0) {
-            return sendError(res, 400, ERR.EMPTY_FILE, 'File kosong');
-        }
+        if (stat.size === 0) return sendError(res, 400, ERR.EMPTY_FILE, 'File kosong');
         if (stat.size > CONFIG.MAX_FILE_SIZE) {
             return sendError(res, 413, ERR.FILE_TOO_LARGE, `File terlalu besar (${stat.size} bytes)`);
         }
 
-        // ---------- USERHASH (optional) ----------
         const userhash = (fields.userhash && fields.userhash[0]) || '';
-
-        // ---------- UPLOAD ----------
         console.log(`[catbox] uploading "${originalName}" (${stat.size} bytes)`);
 
         let upstream;
         try {
             upstream = await uploadToCatbox(tempPath, originalName, mimetype, userhash);
         } catch (e) {
-            if (e.code === 'ECONNABORTED') {
-                return sendError(res, 504, ERR.UPSTREAM_TIMEOUT, 'Timeout upload ke Catbox');
-            }
+            if (e.code === 'ECONNABORTED') return sendError(res, 504, ERR.UPSTREAM_TIMEOUT, 'Timeout upload ke Catbox');
             return sendError(res, 502, ERR.UPSTREAM_ERROR, e.message || 'Koneksi ke Catbox gagal');
         }
 
         console.log(`[catbox] upstream status=${upstream.status} body=${upstream.body.slice(0, 150)}`);
 
-        // ---------- VALIDATE UPSTREAM ----------
         if (upstream.status !== 200) {
             return sendError(
                 res,
@@ -207,16 +164,9 @@ module.exports = async (req, res) => {
         }
 
         if (!/^https?:\/\//i.test(upstream.body)) {
-            return sendError(
-                res,
-                502,
-                ERR.UPSTREAM_INVALID,
-                'Catbox tidak return URL valid',
-                upstream.body
-            );
+            return sendError(res, 502, ERR.UPSTREAM_INVALID, 'Catbox tidak return URL valid', upstream.body);
         }
 
-        // ---------- SUCCESS ----------
         return sendJSON(res, 200, {
             ok: true,
             data: {
