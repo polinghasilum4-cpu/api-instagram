@@ -1,130 +1,274 @@
-/**
- * Catbox Upload — Vercel Edge Runtime
- * ====================================
- * Runtime: edge (Cloudflare network, bukan AWS Lambda)
- * IP-nya beda dari serverless function biasa
- */
+// language: JavaScript (Node 20, Vercel), file: api/v2/catbox.js
+// Drops in over your existing handler. Same exports shape.
 
-export const config = { runtime: 'edge' };
+const axios = require('axios');
+const FormData = require('form-data');
+const formidable = require('formidable');
+const fs = require('fs');
 
-const CATBOX_URL = 'https://catbox.moe/user/api.php';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
-const MAX_SIZE = 4 * 1024 * 1024; // Edge Function body limit 4MB
+const CONFIG = {
+    MAX_FILE_SIZE: 200 * 1024 * 1024,
+    UPLOAD_TIMEOUT: 120000,
+    CATBOX_URL: 'https://catbox.moe/user/api.php',
+    LITTERBOX_URL: 'https://litterbox.catbox.moe/resources/internals/api.php',
+    LITTERBOX_EXPIRY: '72h',
+    // Real, current Chrome. Update quarterly.
+    UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    ACCEPTED_FIELDS: ['file', 'fileToUpload', 'image', 'upload'],
+    SESSION_TTL: 5 * 60 * 1000,
+};
 
-function corsHeaders() {
-    return {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Filename, X-Requested-With',
-    };
-}
+const ERR = {
+    METHOD_NOT_ALLOWED: 'METHOD_NOT_ALLOWED',
+    NO_FILE: 'NO_FILE',
+    EMPTY_FILE: 'EMPTY_FILE',
+    FILE_TOO_LARGE: 'FILE_TOO_LARGE',
+    PARSE_ERROR: 'PARSE_ERROR',
+    UPSTREAM_TIMEOUT: 'UPSTREAM_TIMEOUT',
+    UPSTREAM_ERROR: 'UPSTREAM_ERROR',
+    UPSTREAM_INVALID: 'UPSTREAM_INVALID',
+    INTERNAL: 'INTERNAL',
+};
 
-function jsonResponse(payload, status) {
-    return new Response(JSON.stringify(payload), {
-        status,
-        headers: {
-            'Content-Type': 'application/json; charset=utf-8',
-            ...corsHeaders(),
-        },
-    });
-}
+// ---------- Session cache ----------
+let sessionCookie = null;
+let sessionAt = 0;
 
-export default async function handler(request) {
-    if (request.method === 'OPTIONS') {
-        return new Response(null, { status: 204, headers: corsHeaders() });
-    }
-    if (request.method !== 'POST') {
-        return jsonResponse({ ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: 'Hanya POST yang diizinkan' } }, 405);
-    }
-
-    console.log('[catbox] incoming request');
+async function primeCatboxSession() {
+    const now = Date.now();
+    if (sessionCookie && (now - sessionAt) < CONFIG.SESSION_TTL) return sessionCookie;
 
     try {
-        const url = new URL(request.url);
-        let filename = url.searchParams.get('filename') || request.headers.get('x-filename') || 'file';
-        filename = String(filename).replace(/[^\w\-. ]/g, '_').slice(0, 100) || 'file';
-
-        const bodyBuffer = await request.arrayBuffer();
-        if (!bodyBuffer || bodyBuffer.byteLength === 0) {
-            return jsonResponse({ ok: false, error: { code: 'EMPTY_FILE', message: 'Body kosong' } }, 400);
-        }
-        if (bodyBuffer.byteLength > MAX_SIZE) {
-            return jsonResponse({ ok: false, error: { code: 'FILE_TOO_LARGE', message: `Kebesaran (${bodyBuffer.byteLength} bytes, max ${MAX_SIZE})` } }, 413);
-        }
-
-        console.log(`[catbox] ${filename} (${bodyBuffer.byteLength} bytes)`);
-
-        // Build multipart manual (Web API)
-        const boundary = '----WebKitFormBoundary' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
-        const CRLF = '\r\n';
-        const encoder = new TextEncoder();
-        const safeName = filename.replace(/[\r\n"\\]/g, '_');
-
-        const head = encoder.encode(
-            `--${boundary}${CRLF}` +
-            `Content-Disposition: form-data; name="reqtype"${CRLF}${CRLF}` +
-            `fileupload${CRLF}` +
-            `--${boundary}${CRLF}` +
-            `Content-Disposition: form-data; name="userhash"${CRLF}${CRLF}${CRLF}` +
-            `--${boundary}${CRLF}` +
-            `Content-Disposition: form-data; name="fileToUpload"; filename="${safeName}"${CRLF}` +
-            `Content-Type: application/octet-stream${CRLF}${CRLF}`
-        );
-        const tail = encoder.encode(`${CRLF}--${boundary}--${CRLF}`);
-
-        const full = new Uint8Array(head.byteLength + bodyBuffer.byteLength + tail.byteLength);
-        full.set(head, 0);
-        full.set(new Uint8Array(bodyBuffer), head.byteLength);
-        full.set(tail, head.byteLength + bodyBuffer.byteLength);
-
-        const catRes = await fetch(CATBOX_URL, {
-            method: 'POST',
+        const r = await fetch('https://catbox.moe/', {
             headers: {
-                'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,id;q=0.7',
-                'Cache-Control': 'no-cache',
-                'Origin': 'https://catbox.moe',
-                'Referer': 'https://catbox.moe/',
-                'User-Agent': UA,
-                'X-Requested-With': 'XMLHttpRequest',
+                'user-agent': CONFIG.UA,
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'accept-language': 'en-US,en;q=0.9',
             },
-            body: full,
+            signal: AbortSignal.timeout(8000),
         });
 
-        const text = (await catRes.text()).trim();
-        console.log(`[catbox] upstream ${catRes.status} ${text.slice(0, 150)}`);
+        // Node 20 fetch exposes getSetCookie()
+        const setCookies = typeof r.headers.getSetCookie === 'function'
+            ? r.headers.getSetCookie()
+            : [r.headers.get('set-cookie')].filter(Boolean);
 
-        if (catRes.status !== 200) {
-            return jsonResponse({
-                ok: false,
-                error: {
-                    code: 'UPSTREAM_ERROR',
-                    message: `Catbox HTTP ${catRes.status}`,
-                    raw: text.slice(0, 300),
-                },
-            }, catRes.status >= 400 && catRes.status < 500 ? catRes.status : 502);
+        sessionCookie = setCookies
+            .map(c => c.split(';')[0].trim())
+            .filter(Boolean)
+            .join('; ');
+
+        sessionAt = now;
+        console.log('[catbox] session primed:', sessionCookie.slice(0, 60) || '(none)');
+    } catch (e) {
+        console.warn('[catbox] prime failed:', e.message);
+        sessionCookie = null;
+    }
+    return sessionCookie;
+}
+
+// ---------- helpers ----------
+function sendJSON(res, status, payload) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.status(status).json(payload);
+}
+
+function sendError(res, status, code, message, raw) {
+    const payload = { ok: false, error: { code, message } };
+    if (raw) payload.error.raw = String(raw).slice(0, 300);
+    return sendJSON(res, status, payload);
+}
+
+function safeUnlink(p) {
+    if (!p) return;
+    try { fs.unlinkSync(p); } catch (_) {}
+}
+
+function pickUploadedFile(files) {
+    for (const field of CONFIG.ACCEPTED_FIELDS) {
+        const val = files[field];
+        if (!val) continue;
+        const f = Array.isArray(val) ? val[0] : val;
+        if (f) return f;
+    }
+    return null;
+}
+
+function setupCors(res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+}
+
+// ---------- catbox upload (with cookie) ----------
+async function uploadToCatbox(filePath, filename, mimetype, userhash, cookie) {
+    const fd = new FormData();
+    fd.append('reqtype', 'fileupload');
+    if (userhash) fd.append('userhash', userhash);
+    fd.append('fileToUpload', fs.createReadStream(filePath), {
+        filename,
+        contentType: mimetype || 'application/octet-stream',
+    });
+
+    const headers = {
+        ...fd.getHeaders(),
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': 'https://catbox.moe',
+        'Referer': 'https://catbox.moe/',
+        'User-Agent': CONFIG.UA,
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+    };
+    if (cookie) headers['Cookie'] = cookie;
+
+    const res = await axios.post(CONFIG.CATBOX_URL, fd, {
+        headers,
+        timeout: CONFIG.UPLOAD_TIMEOUT,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        validateStatus: () => true,
+        responseType: 'text',
+        transformResponse: [(d) => d],
+    });
+
+    return { status: res.status, body: String(res.data || '').trim() };
+}
+
+// ---------- litterbox fallback ----------
+async function uploadToLitterbox(filePath, filename, mimetype) {
+    const fd = new FormData();
+    fd.append('reqtype', 'fileupload');
+    fd.append('time', CONFIG.LITTERBOX_EXPIRY);
+    fd.append('fileToUpload', fs.createReadStream(filePath), {
+        filename,
+        contentType: mimetype || 'application/octet-stream',
+    });
+
+    const res = await axios.post(CONFIG.LITTERBOX_URL, fd, {
+        headers: { ...fd.getHeaders(), 'User-Agent': CONFIG.UA },
+        timeout: CONFIG.UPLOAD_TIMEOUT,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        validateStatus: () => true,
+        responseType: 'text',
+        transformResponse: [(d) => d],
+    });
+
+    return { status: res.status, body: String(res.data || '').trim() };
+}
+
+// ---------- handler ----------
+module.exports = async (req, res) => {
+    setupCors(res);
+    if (req.method === 'OPTIONS') return res.status(204).end();
+    if (req.method !== 'POST') {
+        return sendError(res, 405, ERR.METHOD_NOT_ALLOWED, 'Hanya POST yang diizinkan');
+    }
+
+    let tempPath = null;
+    try {
+        const form = formidable({
+            maxFileSize: CONFIG.MAX_FILE_SIZE,
+            multiples: false,
+            allowEmptyFiles: false,
+            keepExtensions: true,
+        });
+
+        let fields, files;
+        try {
+            [fields, files] = await form.parse(req);
+        } catch (e) {
+            const isTooBig = e.code === 'ETOOBIG' || /maxFileSize/i.test(e.message || '');
+            return sendError(
+                res,
+                isTooBig ? 413 : 400,
+                isTooBig ? ERR.FILE_TOO_LARGE : ERR.PARSE_ERROR,
+                isTooBig ? 'File terlalu besar (>200MB)' : 'Gagal parse form: ' + e.message
+            );
         }
 
-        if (!/^https?:\/\//i.test(text)) {
-            return jsonResponse({
-                ok: false,
-                error: { code: 'UPSTREAM_INVALID', message: 'Catbox tidak return URL valid', raw: text.slice(0, 300) },
-            }, 502);
+        const uploaded = pickUploadedFile(files);
+        if (!uploaded) return sendError(res, 400, ERR.NO_FILE, 'File tidak ditemukan. Kirim multipart/form-data dengan field fileToUpload.');
+
+        tempPath = uploaded.filepath || uploaded.path;
+        const originalName = uploaded.originalFilename || uploaded.name || 'file';
+        const mimetype = uploaded.mimetype || 'application/octet-stream';
+
+        let stat;
+        try { stat = fs.statSync(tempPath); }
+        catch { return sendError(res, 400, ERR.PARSE_ERROR, 'File temp tidak bisa dibaca'); }
+
+        if (stat.size === 0) return sendError(res, 400, ERR.EMPTY_FILE, 'File kosong');
+        if (stat.size > CONFIG.MAX_FILE_SIZE) {
+            return sendError(res, 413, ERR.FILE_TOO_LARGE, `File terlalu besar (${stat.size} bytes)`);
         }
 
-        return jsonResponse({
+        const userhash = (fields.userhash && fields.userhash[0]) || '';
+        const cookie = await primeCatboxSession();
+
+        let upstream;
+        try {
+            upstream = await uploadToCatbox(tempPath, originalName, mimetype, userhash, cookie);
+        } catch (e) {
+            if (e.code === 'ECONNABORTED') return sendError(res, 504, ERR.UPSTREAM_TIMEOUT, 'Timeout upload ke Catbox');
+            return sendError(res, 502, ERR.UPSTREAM_ERROR, e.message || 'Koneksi ke Catbox gagal');
+        }
+
+        // 412 = anti-abuse. Retry once with a fresh session.
+        if (upstream.status === 412) {
+            console.log('[catbox] 412, retrying with fresh session');
+            sessionCookie = null; sessionAt = 0;
+            const fresh = await primeCatboxSession();
+            try {
+                upstream = await uploadToCatbox(tempPath, originalName, mimetype, userhash, fresh);
+            } catch (_) {}
+        }
+
+        // Still failing on catbox → litterbox fallback (temporary host, less strict)
+        let source = 'catbox';
+        if (upstream.status !== 200 || !/^https?:\/\//i.test(upstream.body)) {
+            console.log(`[catbox] primary failed (${upstream.status}), trying litterbox`);
+            try {
+                const lb = await uploadToLitterbox(tempPath, originalName, mimetype);
+                if (lb.status === 200 && /^https?:\/\//i.test(lb.body)) {
+                    upstream = lb;
+                    source = 'litterbox';
+                }
+            } catch (_) {}
+        }
+
+        if (upstream.status !== 200) {
+            return sendError(
+                res,
+                upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502,
+                ERR.UPSTREAM_ERROR,
+                `Uploader HTTP ${upstream.status}`,
+                upstream.body
+            );
+        }
+
+        if (!/^https?:\/\//i.test(upstream.body)) {
+            return sendError(res, 502, ERR.UPSTREAM_INVALID, 'Uploader tidak return URL valid', upstream.body);
+        }
+
+        return sendJSON(res, 200, {
             ok: true,
             data: {
-                url: text,
-                filename,
-                size: bodyBuffer.byteLength,
-                expires: 'Permanent',
+                url: upstream.body,
+                filename: originalName,
+                size: stat.size,
+                mimetype,
+                source,
+                expires: source === 'litterbox' ? CONFIG.LITTERBOX_EXPIRY : 'Permanent',
             },
-        }, 200);
+        });
 
     } catch (err) {
         console.error('[catbox] fatal:', err.message);
-        return jsonResponse({ ok: false, error: { code: 'INTERNAL', message: err.message || 'Internal error' } }, 500);
+        return sendError(res, 500, ERR.INTERNAL, err.message || 'Internal server error');
+    } finally {
+        safeUnlink(tempPath);
     }
-            }
+};
