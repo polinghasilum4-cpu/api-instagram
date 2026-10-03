@@ -8,23 +8,30 @@
  *   GET  /api/pxbee?url=<image_url>       → process by URL (simple)
  *
  * Response:
- *   { success: true, data: { url, size, elapsed } }
+ *   { success: true, data: { url, taskId, elapsed, ... } }
  */
 
 const axios = require('axios');
 const crypto = require('crypto');
 const { CookieJar } = require('tough-cookie');
 const { wrapper } = require('axios-cookiejar-support');
-const formidable = require('formidable');
+
+// Fix formidable v3 export (CJS/ESM dual)
+const formidableModule = require('formidable');
+const IncomingForm =
+    formidableModule.IncomingForm ||
+    formidableModule.default ||
+    formidableModule.formidable ||
+    formidableModule;
 
 
 // ======================================================================
-// Vercel config — disable body parser for multipart
+// Vercel config — disable body parser untuk multipart
 // ======================================================================
 const vercelConfig = {
-  api: {
-    bodyParser: false,
-  },
+    api: {
+        bodyParser: false,
+    },
 };
 module.exports.config = vercelConfig;
 
@@ -42,8 +49,8 @@ const SIGN_PATH = '/api/resource/images/uploader/commonSign';
 const UPLOAD_APP_ID = 'app-fotor-web';
 const TASK_APP_ID = 'app-pxbee-web';
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024;      // 10 MB
-const MAX_POLL_ATTEMPTS = 25;                 // 25 × 2s = 50s max
+const MAX_FILE_SIZE = 10 * 1024 * 1024;   // 10 MB
+const MAX_POLL_ATTEMPTS = 25;              // 25 × 2s = 50s
 const POLL_INTERVAL_MS = 2000;
 
 
@@ -94,7 +101,7 @@ function detectExtFromBuffer(buf) {
 
 
 // ======================================================================
-// PXBee Client (per-request, stateless)
+// PXBee Client
 // ======================================================================
 class PXBee {
     constructor() {
@@ -161,7 +168,6 @@ class PXBee {
             }
         }
 
-        // Fetch homepage buat dapetin cf_bm
         await this.http.get(SITE, {
             headers: { 'Accept': 'text/html,application/xhtml+xml' },
         });
@@ -169,9 +175,6 @@ class PXBee {
         this.initialized = true;
     }
 
-    // ------------------------------------------------------------------
-    // Presigned URL
-    // ------------------------------------------------------------------
     async getPresignedUrl(extension, type = 'image') {
         const url = UPLOAD_GATEWAY + SIGN_PATH;
         const res = await this.http.post(url, { extension, type }, {
@@ -200,9 +203,6 @@ class PXBee {
         return { uploadUrl, downloadUrl, key: d.data?.key };
     }
 
-    // ------------------------------------------------------------------
-    // Upload buffer ke S3
-    // ------------------------------------------------------------------
     async uploadBuffer(buffer, ext, mime) {
         const presigned = await this.getPresignedUrl(ext, 'image');
 
@@ -224,9 +224,6 @@ class PXBee {
         return presigned.downloadUrl;
     }
 
-    // ------------------------------------------------------------------
-    // Submit task
-    // ------------------------------------------------------------------
     async submitTask(imageUrl, type = 'textremover') {
         const body = {
             type,
@@ -262,9 +259,6 @@ class PXBee {
         return taskId;
     }
 
-    // ------------------------------------------------------------------
-    // Poll task
-    // ------------------------------------------------------------------
     async pollTask(taskId) {
         const doneStates = ['SUCCESS', 'COMPLETED', 'DONE', 'FINISHED', 'READY'];
         const failStates = ['FAILED', 'ERROR', 'CANCELLED'];
@@ -324,9 +318,6 @@ class PXBee {
         throw new Error(`Polling timeout after ${MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 1000}s`);
     }
 
-    // ------------------------------------------------------------------
-    // Full flow
-    // ------------------------------------------------------------------
     async process(buffer, ext, mime) {
         await this.init();
 
@@ -345,7 +336,7 @@ class PXBee {
 function cors(res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Api-Key, X-Image-Url');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With, X-Api-Key, X-Image-Url');
     res.setHeader('Cache-Control', 'no-store');
 }
 
@@ -359,24 +350,24 @@ function err(res, msg, status = 400) {
     return res.status(status).json({ success: false, error: msg });
 }
 
-// Parse multipart form-data
+// Parse multipart form-data pakai formidable v3
 function parseMultipart(req) {
     return new Promise((resolve, reject) => {
-        const form = formidable({
+        const form = new IncomingForm({
             maxFileSize: MAX_FILE_SIZE,
             maxTotalFileSize: MAX_FILE_SIZE,
             multiples: false,
             keepExtensions: true,
         });
 
-        form.parse(req, (err, fields, files) => {
-            if (err) return reject(err);
+        form.parse(req, (e, fields, files) => {
+            if (e) return reject(e);
             resolve({ fields, files });
         });
     });
 }
 
-// Parse JSON body (untuk mode URL)
+// Parse JSON body manual (karena bodyParser: false)
 function parseJson(req) {
     return new Promise((resolve, reject) => {
         let data = '';
@@ -474,7 +465,7 @@ module.exports = async function handler(req, res) {
         }
 
         // ══════════════════════════════════════════════════════════════
-        // Mode 2: POST multipart (file upload)
+        // Mode 2: POST
         // ══════════════════════════════════════════════════════════════
         else if (req.method === 'POST') {
             const contentType = req.headers['content-type'] || '';
@@ -498,10 +489,17 @@ module.exports = async function handler(req, res) {
 
             // ── Mode 2b: Multipart form-data ──
             else if (contentType.includes('multipart/form-data')) {
-                const { files } = await parseMultipart(req);
+                let parsed;
+                try {
+                    parsed = await parseMultipart(req);
+                } catch (e) {
+                    return err(res, `Multipart parse error: ${e.message}`);
+                }
+
+                const { files } = parsed;
 
                 // Cari field image/file (case-insensitive)
-                const fileKey = Object.keys(files).find(k =>
+                const fileKey = Object.keys(files || {}).find(k =>
                     ['image', 'file', 'photo', 'picture'].includes(k.toLowerCase())
                 );
 
@@ -515,8 +513,13 @@ module.exports = async function handler(req, res) {
                     return err(res, 'File kosong');
                 }
 
-                if (f.size > MAX_FILE_SIZE) {
-                    return err(res, `File terlalu besar (${(f.size / 1024 / 1024).toFixed(1)} MB, max ${MAX_FILE_SIZE / 1024 / 1024} MB)`, 413);
+                const fileSize = f.size || 0;
+                if (fileSize > MAX_FILE_SIZE) {
+                    return err(
+                        res,
+                        `File terlalu besar (${(fileSize / 1024 / 1024).toFixed(1)} MB, max ${MAX_FILE_SIZE / 1024 / 1024} MB)`,
+                        413
+                    );
                 }
 
                 buffer = require('fs').readFileSync(f.filepath);
@@ -538,7 +541,7 @@ module.exports = async function handler(req, res) {
             return err(res, 'Method not allowed', 405);
         }
 
-        if (!buffer) {
+        if (!buffer || buffer.length === 0) {
             return err(res, 'Tidak ada image yang diterima');
         }
 
