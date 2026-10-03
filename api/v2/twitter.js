@@ -1,13 +1,17 @@
 /**
- * X2Twitter API — Vercel Serverless Function (Node.js)
- * ====================================================
- * GET  /api/download?url=<tweet_url>&lang=id
- * POST /api/download  {"url": "...", "lang": "id"}
+ * X2Twitter Downloader — Vercel Serverless Function
+ * =================================================
+ * GET  /api/twitter?url=<tweet_url>&lang=id
+ * POST /api/twitter  {"url": "...", "lang": "id"}
+ *
+ * Environment (opsional):
+ *   PROXY_URL=http://user:pass@host:port
  */
 
 const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 
 // ======================================================================
@@ -35,20 +39,42 @@ const HEADERS = {
 
 
 // ======================================================================
-// Client (singleton, di-reuse antar warm invocation)
+// Proxy (opsional)
+// ======================================================================
+function makeProxyAgent() {
+  const proxyUrl = process.env.PROXY_URL;
+  if (!proxyUrl) return null;
+  try {
+    return new HttpsProxyAgent(proxyUrl);
+  } catch (e) {
+    console.warn('Proxy invalid, skip:', e.message);
+    return null;
+  }
+}
+
+
+// ======================================================================
+// Client
 // ======================================================================
 class X2Twitter {
   constructor() {
     this.jar = new CookieJar();
-    this.client = wrapper(
-      axios.create({
-        jar: this.jar,
-        headers: HEADERS,
-        timeout: 20000,
-        maxRedirects: 5,
-        validateStatus: () => true,
-      })
-    );
+
+    const config = {
+      jar: this.jar,
+      headers: HEADERS,
+      timeout: 20000,
+      maxRedirects: 5,
+      validateStatus: () => true,
+    };
+
+    const agent = makeProxyAgent();
+    if (agent) {
+      config.httpsAgent = agent;
+      config.proxy = false; // biar axios nggak double-proxy
+    }
+
+    this.client = wrapper(axios.create(config));
     this.warmedUp = false;
     this.cftoken = null;
   }
@@ -57,7 +83,7 @@ class X2Twitter {
     const pattern = /^https?:\/\/(www\.)?(x\.com|twitter\.com|mobile\.twitter\.com|mobile\.x\.com)\/[^/]+\/status\/\d+/i;
     if (!pattern.test(url)) {
       throw new Error(
-        "URL tidak valid. Harus link tweet, contoh: https://x.com/user/status/1234567890"
+        'URL tidak valid. Harus link tweet, contoh: https://x.com/user/status/1234567890'
       );
     }
     return url;
@@ -65,7 +91,6 @@ class X2Twitter {
 
   async warmUp() {
     if (this.warmedUp) return;
-
     const res = await this.client.get(`${BASE_URL}/id3`);
     if (typeof res.data === 'string') {
       const m = res.data.match(/"cftoken"\s*:\s*"([^"]+)"/);
@@ -76,11 +101,16 @@ class X2Twitter {
 
   async userVerify(tweetUrl) {
     await this.warmUp();
-
     const body = new URLSearchParams({ url: tweetUrl }).toString();
     const res = await this.client.post(API_VERIFY, body);
 
-    const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+    let data;
+    try {
+      data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+    } catch {
+      return null;
+    }
+
     const token = data.cftoken || data.token;
     if (token) this.cftoken = token;
     return token;
@@ -88,7 +118,6 @@ class X2Twitter {
 
   async ajaxSearch(tweetUrl, lang = 'id') {
     if (!this.cftoken) throw new Error('cftoken belum ada');
-
     const body = new URLSearchParams({
       q: tweetUrl,
       lang,
@@ -96,7 +125,11 @@ class X2Twitter {
     }).toString();
 
     const res = await this.client.post(API_SEARCH, body);
-    return typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+    try {
+      return typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+    } catch {
+      return null;
+    }
   }
 
   static parseResult(html) {
@@ -116,7 +149,7 @@ class X2Twitter {
     let m;
 
     m = html.match(/<h3>([\s\S]*?)<\/h3>/);
-    if (m) result.title = m[1].trim();
+    if (m) result.title = m[1].replace(/<[^>]+>/g, '').trim();
 
     m = html.match(/<p>(\d+:\d+)<\/p>/);
     if (m) result.duration = m[1];
@@ -169,7 +202,7 @@ class X2Twitter {
 
 
 // ======================================================================
-// Singleton cache
+// Singleton (reuse cookie antar warm invocation)
 // ======================================================================
 let _client = null;
 function getClient() {
@@ -179,37 +212,44 @@ function getClient() {
 
 
 // ======================================================================
-// CORS helper
+// Helpers
 // ======================================================================
-function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Cache-Control', 'no-store');
+function parseBody(req) {
+  if (!req.body) return {};
+  if (typeof req.body === 'string') {
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      // fallback: form-urlencoded
+      const params = new URLSearchParams(req.body);
+      return Object.fromEntries(params);
+    }
+  }
+  return req.body;
 }
 
 
 // ======================================================================
-// Handler (Vercel Node.js)
+// Handler
 // ======================================================================
 module.exports = async function handler(req, res) {
-  cors(res);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With');
+  res.setHeader('Cache-Control', 'no-store');
 
-  // Preflight
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
 
   if (!['GET', 'POST'].includes(req.method)) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
   // Ambil URL dari query atau body
-  let url = req.query.url;
-  let lang = req.query.lang || 'id';
+  let url = req.query?.url;
+  let lang = req.query?.lang || 'id';
 
-  if (!url && req.body) {
-    const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body;
+  if (!url) {
+    const body = parseBody(req);
     url = body.url;
     lang = body.lang || lang;
   }
@@ -218,10 +258,10 @@ module.exports = async function handler(req, res) {
   if (!url) {
     return res.status(200).json({
       success: true,
-      service: 'x2twitter-api',
+      service: 'x2twitter',
       status: 'ok',
       usage: {
-        GET: '/api/download?url=<tweet_url>&lang=id',
+        GET: '/api/twitter?url=<tweet_url>&lang=id',
         POST: '{"url": "...", "lang": "id"}',
       },
     });
@@ -245,7 +285,7 @@ module.exports = async function handler(req, res) {
 
     return res.status(200).json({ success: true, data: result });
   } catch (e) {
-    console.error('Error:', e.message);
+    console.error('[x2twitter] error:', e.message);
     return res.status(502).json({ success: false, error: `Upstream error: ${e.message}` });
   }
 };
