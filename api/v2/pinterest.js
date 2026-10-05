@@ -53,6 +53,15 @@ async function callPinSaver(pinUrl, type) {
     return { status: r.status, data };
 }
 
+// Cek response valid atau cuma default share image
+function isValidResult(data) {
+    if (!data || data.redirect) return false;
+    if (!data.downloadUrl) return false;
+    // Default share image dari Pinterest — anggap gagal
+    if (data.downloadUrl.includes('facebook_share_image')) return false;
+    return true;
+}
+
 module.exports = async function handler(req, res) {
     if (req.method === 'OPTIONS') { cors(res); return res.status(204).end(); }
 
@@ -70,7 +79,7 @@ module.exports = async function handler(req, res) {
             success: true,
             service: 'pinterest-downloader',
             status: 'ok',
-            note: 'Auto-detect video/image',
+            note: 'Auto-detect video/image via PinSaver',
             usage: {
                 GET: '/api/v2/pinterest?url=<pin_url>',
                 POST: '{"url": "<pin_url>"}',
@@ -83,54 +92,48 @@ module.exports = async function handler(req, res) {
     }
 
     try {
-        // ══ Step 1: coba sebagai VIDEO ══
-        console.log('[pinterest] 1) try video');
-        let r = await callPinSaver(pinUrl, 'video');
+        // ══ Step 1: coba sebagai IMAGE dulu (kemungkinan besar pin gambar) ══
+        console.log('[pinterest] 1) try image');
+        let r = await callPinSaver(pinUrl, 'image');
         console.log('   →', r.status, JSON.stringify(r.data).slice(0, 200));
 
-        // Cek: apakah sukses atau redirect
-        const isRedirect = r.data && r.data.redirect === true;
-        const hasData = r.data && !isRedirect && (r.data.url || r.data.video || r.data.image || r.data.medias);
-
-        if (r.status === 200 && hasData) {
+        if (r.status === 200 && isValidResult(r.data)) {
             return ok(res, {
-                type: 'video',
-                source: 'pinsaver',
                 ...r.data,
+                source: 'pinsaver',
+                type: r.data.content_type || 'image',
             });
         }
 
-        // ══ Step 2: kalau redirect, coba IMAGE ══
-        console.log('[pinterest] 2) try image');
-        r = await callPinSaver(pinUrl, 'image');
+        // ══ Step 2: kalau gagal/redirect, coba VIDEO ══
+        console.log('[pinterest] 2) try video');
+        r = await callPinSaver(pinUrl, 'video');
         console.log('   →', r.status, JSON.stringify(r.data).slice(0, 200));
 
-        const stillRedirect = r.data && r.data.redirect === true;
-        const hasImage = r.data && !stillRedirect && (r.data.url || r.data.image);
-
-        if (r.status === 200 && hasImage) {
+        if (r.status === 200 && isValidResult(r.data)) {
             return ok(res, {
-                type: 'image',
-                source: 'pinsaver',
                 ...r.data,
+                source: 'pinsaver',
+                type: r.data.content_type || 'video',
             });
         }
 
-        // ══ Step 3: fallback — no content_type ══
+        // ══ Step 3: fallback tanpa content_type ══
         console.log('[pinterest] 3) fallback (no content_type)');
         r = await callPinSaver(pinUrl, null);
         console.log('   →', r.status, JSON.stringify(r.data).slice(0, 200));
 
-        if (r.status === 200 && r.data && !r.data.redirect) {
+        if (r.status === 200 && isValidResult(r.data)) {
             return ok(res, {
-                type: 'auto',
-                source: 'pinsaver',
                 ...r.data,
+                source: 'pinsaver',
+                type: r.data.content_type || 'image',
             });
         }
 
         // ══ Semua gagal ══
-        return err(res, `Semua endpoint gagal. Response terakhir: ${JSON.stringify(r.data).slice(0, 200)}`, 502);
+        const errMsg = r.data?.message || r.data?.error || 'Pin tidak ditemukan atau format tidak didukung';
+        return err(res, errMsg, 502);
 
     } catch (e) {
         console.error('[pinterest] error:', e.message);
