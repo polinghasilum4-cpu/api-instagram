@@ -4,6 +4,8 @@
  *  Endpoint: GET /api/v2/instagram?url=<instagram_url>
  * ============================================================ */
 
+const { securityCheck } = require("../_security");
+
 const UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36";
 const BASE = "https://savefromins.com";
 
@@ -139,10 +141,9 @@ async function parseIg(igUrl, token) {
 //  HANDLER
 // ============================================================
 module.exports = async (req, res) => {
+  if (securityCheck(req, res)) return;
+
   // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const igUrl = req.query.url;

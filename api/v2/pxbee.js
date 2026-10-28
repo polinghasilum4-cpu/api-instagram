@@ -11,6 +11,8 @@
  *   { success: true, data: { url, taskId, elapsed, ... } }
  */
 
+const { securityCheck } = require("../_security");
+
 const axios = require('axios');
 const crypto = require('crypto');
 const { CookieJar } = require('tough-cookie');
@@ -334,9 +336,6 @@ class PXBee {
 // HTTP helpers
 // ======================================================================
 function cors(res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With, X-Api-Key, X-Image-Url');
     res.setHeader('Cache-Control', 'no-store');
 }
 

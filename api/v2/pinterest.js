@@ -5,6 +5,8 @@
  * GET  /api/v2/pinterest?url=<pin_url>
  */
 
+const { securityCheck } = require("../_security");
+
 const axios = require('axios');
 
 const PX_BASE = 'https://web--pinsaver-backend--bvs4tz6kpmqp.code.run';
@@ -18,9 +20,6 @@ const PX_HEADERS = {
 };
 
 function cors(res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Cache-Control', 'no-store');
 }
 

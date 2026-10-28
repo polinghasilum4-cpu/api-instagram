@@ -1,3 +1,5 @@
+const { securityCheck } = require("../_security");
+
 const axios = require('axios');
 const { CookieJar } = require('tough-cookie');
 const { wrapper } = require('axios-cookiejar-support');
@@ -23,9 +25,6 @@ module.exports.config = { api: { bodyParser: false } };
 let CACHE = { deviceId: null, ticket: null, expiresAt: 0 };
 
 const cors = (res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Cache-Control', 'no-store');
 };
 const ok = (res, data) => { cors(res); return res.status(200).json({ success: true, data }); };

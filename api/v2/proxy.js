@@ -6,6 +6,8 @@
  * Security: SSRF protection, size limit, safe filename
  */
 
+const { securityCheck } = require("../_security");
+
 const axios = require('axios');
 const { URL } = require('url');
 
@@ -74,9 +76,7 @@ function buildContentDisposition(filename) {
 }
 
 module.exports = async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (securityCheck(req, res)) return;
 
     if (req.method === 'OPTIONS') return res.status(204).end();
     if (req.method !== 'GET') {

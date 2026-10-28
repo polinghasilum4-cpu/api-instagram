@@ -1,3 +1,5 @@
+const { securityCheck } = require("../_security");
+
 const QRCode = require('qrcode');
 const validator = require('validator');
 
@@ -44,14 +46,10 @@ function parseBody(req) {
 }
 
 module.exports = async (req, res) => {
-    // CORS
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (securityCheck(req, res)) return;
 
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
+    // CORS
+    
 
     if (req.method !== 'POST') {
         return res.status(405).json({
