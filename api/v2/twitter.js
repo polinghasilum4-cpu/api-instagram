@@ -8,14 +8,13 @@
  *   PROXY_URL=http://user:pass@host:port
  */
 
-const { securityCheck } = require("../_security");
-
 const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
 
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 // ======================================================================
 // Config
 // ======================================================================
@@ -235,9 +234,13 @@ function parseBody(req) {
 // Handler
 // ======================================================================
 module.exports = async function handler(req, res) {
+  applyCors(req, res, { methods: 'GET, OPTIONS' });
   res.setHeader('Cache-Control', 'no-store');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
 
   if (!['GET', 'POST'].includes(req.method)) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });

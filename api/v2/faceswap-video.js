@@ -1,11 +1,10 @@
-const { securityCheck } = require("../_security");
-
 const axios = require('axios');
 const { CookieJar } = require('tough-cookie');
 const { wrapper } = require('axios-cookiejar-support');
 const FormData = require('form-data');
 const crypto = require('crypto');
 const formidableModule = require('formidable');
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 const IncomingForm = formidableModule.IncomingForm || formidableModule.default || formidableModule.formidable || formidableModule;
 
 const BASE = 'https://easyfaceswap.com';
@@ -24,11 +23,8 @@ module.exports.config = { api: { bodyParser: false } };
 // Cache device + ticket (module-level, persist antar warm invocation)
 let CACHE = { deviceId: null, ticket: null, expiresAt: 0 };
 
-const cors = (res) => {
-    res.setHeader('Cache-Control', 'no-store');
-};
-const ok = (res, data) => { cors(res); return res.status(200).json({ success: true, data }); };
-const err = (res, msg, status = 400, extra = {}) => { cors(res); return res.status(status).json({ success: false, error: msg, ...extra }); };
+const ok = (res, data) => { res.setHeader('Cache-Control', 'no-store'); return res.status(200).json({ success: true, data }); };
+const err = (res, msg, status = 400, extra = {}) => { res.setHeader('Cache-Control', 'no-store'); return res.status(status).json({ success: false, error: msg, ...extra }); };
 const trace = () => crypto.randomUUID();
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -306,7 +302,10 @@ async function processFaceSwap(videoBuffer, faceBuffer) {
 }
 
 module.exports = async function handler(req, res) {
-    if (req.method === 'OPTIONS') { cors(res); return res.status(204).end(); }
+    applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
+    if (req.method === 'OPTIONS') { return res.status(204).end(); }
+    if (!rateLimit(req, res)) return;
+    if (!requireApiKey(req, res)) return;
 
     if (req.method === 'GET') {
         return ok(res, { service: 'video-face-swap', status: 'ok', mode: 'auto' });

@@ -11,13 +11,12 @@
  *   { success: true, data: { url, taskId, elapsed, ... } }
  */
 
-const { securityCheck } = require("../_security");
-
 const axios = require('axios');
 const crypto = require('crypto');
 const { CookieJar } = require('tough-cookie');
 const { wrapper } = require('axios-cookiejar-support');
 
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 // Fix formidable v3 export (CJS/ESM dual)
 const formidableModule = require('formidable');
 const IncomingForm =
@@ -335,17 +334,14 @@ class PXBee {
 // ======================================================================
 // HTTP helpers
 // ======================================================================
-function cors(res) {
-    res.setHeader('Cache-Control', 'no-store');
-}
-
 function ok(res, data) {
-    cors(res);
+    // CORS sudah di-set sekali di awal handler (applyCors); di sini cukup cache header.
+    res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({ success: true, data });
 }
 
 function err(res, msg, status = 400) {
-    cors(res);
+    res.setHeader('Cache-Control', 'no-store');
     return res.status(status).json({ success: false, error: msg });
 }
 
@@ -422,11 +418,14 @@ async function fetchImageBuffer(url) {
 module.exports = async function handler(req, res) {
     const t0 = Date.now();
 
-    // ── CORS preflight ──
+    // ── CORS ──
+    applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
     if (req.method === 'OPTIONS') {
-        cors(res);
         return res.status(204).end();
     }
+    if (!rateLimit(req, res)) return;
+    if (!requireApiKey(req, res)) return;
+
 
     // ── Health check ──
     if (req.method === 'GET' && !req.query.url) {

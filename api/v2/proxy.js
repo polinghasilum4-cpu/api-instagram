@@ -6,36 +6,26 @@
  * Security: SSRF protection, size limit, safe filename
  */
 
-const { securityCheck } = require("../_security");
-
 const axios = require('axios');
 const { URL } = require('url');
 
-// Private IP ranges (RFC 1918 + special)
-const PRIVATE_IP_REGEX = /^(?:(?:10|127)\.|(?:169\.254|192\.168)\.|172\.(?:1[6-9]|2[0-9]|3[01])\.|0\.0\.0\.0|localhost)/i;
+const { applyCors, requireApiKey, rateLimit, assertPublicUrl } = require('../_lib/security');
 
-function isSafeUrl(urlStr) {
-    let parsed;
-    try { parsed = new URL(urlStr); }
-    catch { return { safe: false, reason: 'Invalid URL' }; }
+// Dipakai di beforeRedirect (sync, gak bisa resolve DNS di situ) buat nolak
+// redirect yang literal nunjuk ke private IP / localhost / metadata endpoint.
+const PRIVATE_IP_LITERAL = /^(?:127\.|10\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2[0-9]|3[01])\.|0\.0\.0\.0$|\[?::1\]?$|localhost$)/i;
 
-    // Only http/https
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-        return { safe: false, reason: `Protocol ${parsed.protocol} tidak diizinkan` };
+// NOTE: assertPublicUrl() resolves DNS dan cek IP hasil resolve-nya, bukan cuma
+// nge-regex hostname. Ini nutup celah DNS-rebinding: domain publik yang
+// di-rebind ke 127.0.0.1/169.254.169.254/private range bakal ketolak juga,
+// bukan cuma hostname literal "localhost"/"127.0.0.1".
+async function isSafeUrl(urlStr) {
+    try {
+        const parsed = await assertPublicUrl(urlStr);
+        return { safe: true, hostname: parsed.hostname.toLowerCase() };
+    } catch (e) {
+        return { safe: false, reason: e.message };
     }
-
-    // Block private hostnames
-    const host = parsed.hostname.toLowerCase();
-    if (PRIVATE_IP_REGEX.test(host)) {
-        return { safe: false, reason: 'Private IP/hostname tidak diizinkan' };
-    }
-
-    // Block non-standard hostname patterns
-    if (!host.includes('.')) {
-        return { safe: false, reason: 'Hostname gak valid' };
-    }
-
-    return { safe: true, hostname: host };
 }
 
 function getReferer(hostname) {
@@ -76,9 +66,12 @@ function buildContentDisposition(filename) {
 }
 
 module.exports = async (req, res) => {
-  if (securityCheck(req, res)) return;
+  applyCors(req, res, { methods: 'GET, OPTIONS' });
 
     if (req.method === 'OPTIONS') return res.status(204).end();
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
     if (req.method !== 'GET') {
         return res.status(405).json({ error: 'Method not allowed' });
     }
@@ -90,7 +83,7 @@ module.exports = async (req, res) => {
     }
 
     // ============ SSRF CHECK ============
-    const check = isSafeUrl(url);
+    const check = await isSafeUrl(url);
     if (!check.safe) {
         return res.status(403).json({ error: 'URL ditolak', reason: check.reason });
     }
@@ -106,6 +99,13 @@ module.exports = async (req, res) => {
             maxContentLength: 500 * 1024 * 1024, // 500 MB cap
             maxBodyLength: 500 * 1024 * 1024,
             validateStatus: () => true, // ← biar bisa handle 4xx/5xx gracefully
+            // Anti-SSRF: redirect ke IP privat/metadata ditolak juga, bukan cuma URL awal.
+            beforeRedirect: (options) => {
+                const h = (options.hostname || options.host || '').toLowerCase();
+                if (PRIVATE_IP_LITERAL.test(h) || h === 'localhost') {
+                    throw new Error('Redirect ke private/internal address diblokir (anti-SSRF)');
+                }
+            },
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36',
                 'Referer': referer,

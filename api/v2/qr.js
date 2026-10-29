@@ -1,8 +1,7 @@
-const { securityCheck } = require("../_security");
-
 const QRCode = require('qrcode');
 const validator = require('validator');
 
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 // Manual parser untuk body JSON (Vercel kadang gak auto-parse)
 function parseBody(req) {
     return new Promise((resolve, reject) => {
@@ -46,10 +45,15 @@ function parseBody(req) {
 }
 
 module.exports = async (req, res) => {
-  if (securityCheck(req, res)) return;
-
     // CORS
-    
+  applyCors(req, res, { methods: 'POST, OPTIONS' });
+
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
 
     if (req.method !== 'POST') {
         return res.status(405).json({
