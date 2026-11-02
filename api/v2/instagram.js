@@ -1,4 +1,3 @@
-const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 /* ============================================================
  *  Instagram Downloader API — by xs0ciety
  *  Auto-scrape token dari savefromins.com
@@ -140,12 +139,12 @@ async function parseIg(igUrl, token) {
 //  HANDLER
 // ============================================================
 module.exports = async (req, res) => {
+  if (!require("../../lib/origin-guard")(req, res)) return;
   // CORS
-  applyCors(req, res, { methods: 'GET, OPTIONS' });
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (!rateLimit(req, res)) return;
-  if (!requireApiKey(req, res)) return;
-
 
   const igUrl = req.query.url;
   if (!igUrl) {

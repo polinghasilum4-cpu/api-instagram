@@ -7,7 +7,6 @@
 
 const axios = require('axios');
 
-const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 const PX_BASE = 'https://web--pinsaver-backend--bvs4tz6kpmqp.code.run';
 const UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36';
 
@@ -18,13 +17,20 @@ const PX_HEADERS = {
     'Accept': '*/*',
 };
 
-function ok(res, data) {
+function cors(res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Cache-Control', 'no-store');
+}
+
+function ok(res, data) {
+    cors(res);
     return res.status(200).json({ success: true, data });
 }
 
 function err(res, msg, status = 400) {
-    res.setHeader('Cache-Control', 'no-store');
+    cors(res);
     return res.status(status).json({ success: false, error: msg });
 }
 
@@ -57,10 +63,8 @@ function isValidResult(data) {
 }
 
 module.exports = async function handler(req, res) {
-    applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
-    if (req.method === 'OPTIONS') { return res.status(204).end(); }
-    if (!rateLimit(req, res)) return;
-    if (!requireApiKey(req, res)) return;
+  if (!require("../../lib/origin-guard")(req, res)) return;
+    if (req.method === 'OPTIONS') { cors(res); return res.status(204).end(); }
 
     let pinUrl = req.query.url;
 
@@ -71,6 +75,7 @@ module.exports = async function handler(req, res) {
 
     // Health check
     if (!pinUrl) {
+        cors(res);
         return res.status(200).json({
             success: true,
             service: 'pinterest-downloader',

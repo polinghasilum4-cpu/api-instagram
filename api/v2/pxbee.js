@@ -16,7 +16,6 @@ const crypto = require('crypto');
 const { CookieJar } = require('tough-cookie');
 const { wrapper } = require('axios-cookiejar-support');
 
-const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 // Fix formidable v3 export (CJS/ESM dual)
 const formidableModule = require('formidable');
 const IncomingForm =
@@ -334,14 +333,20 @@ class PXBee {
 // ======================================================================
 // HTTP helpers
 // ======================================================================
-function ok(res, data) {
-    // CORS sudah di-set sekali di awal handler (applyCors); di sini cukup cache header.
+function cors(res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With, X-Api-Key, X-Image-Url');
     res.setHeader('Cache-Control', 'no-store');
+}
+
+function ok(res, data) {
+    cors(res);
     return res.status(200).json({ success: true, data });
 }
 
 function err(res, msg, status = 400) {
-    res.setHeader('Cache-Control', 'no-store');
+    cors(res);
     return res.status(status).json({ success: false, error: msg });
 }
 
@@ -416,16 +421,14 @@ async function fetchImageBuffer(url) {
 // Vercel Handler
 // ======================================================================
 module.exports = async function handler(req, res) {
+  if (!require("../../lib/origin-guard")(req, res)) return;
     const t0 = Date.now();
 
-    // ── CORS ──
-    applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
+    // ── CORS preflight ──
     if (req.method === 'OPTIONS') {
+        cors(res);
         return res.status(204).end();
     }
-    if (!rateLimit(req, res)) return;
-    if (!requireApiKey(req, res)) return;
-
 
     // ── Health check ──
     if (req.method === 'GET' && !req.query.url) {

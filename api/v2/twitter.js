@@ -14,7 +14,6 @@ const { CookieJar } = require('tough-cookie');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
 
-const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 // ======================================================================
 // Config
 // ======================================================================
@@ -234,13 +233,13 @@ function parseBody(req) {
 // Handler
 // ======================================================================
 module.exports = async function handler(req, res) {
-  applyCors(req, res, { methods: 'GET, OPTIONS' });
+  if (!require("../../lib/origin-guard")(req, res)) return;
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With');
   res.setHeader('Cache-Control', 'no-store');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
-  if (!rateLimit(req, res)) return;
-  if (!requireApiKey(req, res)) return;
-
 
   if (!['GET', 'POST'].includes(req.method)) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
