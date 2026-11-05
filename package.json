@@ -4,7 +4,7 @@
   "private": true,
   "main": "api/index.js",
   "engines": {
-    "node": "20.x"
+    "node": "26.x"
   },
   "dependencies": {
     "axios": "^1.6.0",
