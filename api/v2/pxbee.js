@@ -334,7 +334,7 @@ class PXBee {
 // HTTP helpers
 // ======================================================================
 function cors(res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Origin', 'https://xs0cietylabsz.biz.id');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With, X-Api-Key, X-Image-Url');
     res.setHeader('Cache-Control', 'no-store');
