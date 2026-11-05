@@ -1,90 +1,150 @@
 // javascript | api/v2/instagram.js | Node.js 20 | Vercel Hobby
-// Instagram downloader — token auto-scrape dari savefromins.com
+// Instagram downloader via savefromins.com — single file, auto-scrape credentials.
 // Routes:
-//   POST /api/v2/instagram               body {"url":"https://instagram.com/..."}
-//   GET  /api/v2/instagram?url=...       parse mode
-//   GET  /api/v2/instagram?ig=<b64url>&i=N download mode (streaming)
-// Auto-heal: stream expired (401/403/410/412) → re-scrape token → stream ulang.
+//   POST /api/v2/instagram             body {"url":"https://instagram.com/..."}
+//   GET  /api/v2/instagram?url=...     parse mode
+//   GET  /api/v2/instagram?ig=<b64>&i=N download mode (streaming)
+// Env opsional: ALLOWED_ORIGIN
+
+import crypto from 'node:crypto';
 
 export const config = { maxDuration: 300 };
 
-const UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Mobile Safari/537.36';
+const UA =
+  'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/156.0.0.0 Mobile Safari/537.36';
 const BASE = 'https://savefromins.com';
 const API_URL = 'https://api.savefromins.com/api/contentsite_api/media/parse';
 
-const ALLOWED = process.env.ALLOWED_ORIGIN || 'https://xs0cietylabsz.biz.id';
+const ALLOWED = process.env.ALLOWED_ORIGIN || '*';
 const CORS = {
   'Access-Control-Allow-Origin': ALLOWED,
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-// ---- token cache ---------------------------------------------------------
+// --- credential cache -----------------------------------------------------
 
-let cachedToken = null;
-let cachedAt = 0;
-const CACHE_TTL = 10 * 60 * 1000; // 10 menit
-const FALLBACK_TOKEN = '20250901majwlqo';
+const CRED_TTL_MS = 30 * 60_000; // 30 menit
+const HARDCODED = {
+  auth: 'f8a1c2d4',
+  key:  Buffer.from('f8a1c2d4f8a1c2d4f8a1c2d4f8a1c2d4', 'utf8'),
+};
+let cachedCred = null;
+let cachedCredAt = 0;
 
-async function scrapeToken() {
-  try {
-    const htmlRes = await fetch(BASE + '/', {
-      headers: { 'user-agent': UA },
-      signal: AbortSignal.timeout(8000),
-    });
-    const html = await htmlRes.text();
+async function fetchText(url, ms = 8000) {
+  const res = await fetch(url, {
+    headers: { 'user-agent': UA },
+    signal: AbortSignal.timeout(ms),
+    redirect: 'follow',
+  });
+  if (!res.ok) throw new Error(`fetch ${url} → ${res.status}`);
+  return res.text();
+}
 
-    const jsUrls = [];
-    const regex = /<script[^>]+src="([^"]+)"/g;
-    let m;
-    while ((m = regex.exec(html)) !== null) {
-      let u = m[1];
-      if (!u.startsWith('http')) u = BASE + (u.startsWith('/') ? '' : '/') + u;
-      jsUrls.push(u);
+async function scrapeCredentials() {
+  const home = await fetchText(BASE + '/');
+
+  const srcs = [...home.matchAll(/<script[^>]+src=["']([^"']+\.js[^"']*)["']/g)]
+    .map(m => m[1])
+    .map(u => (u.startsWith('http') ? u : BASE + (u.startsWith('/') ? '' : '/') + u));
+
+  for (const src of srcs) {
+    let js;
+    try { js = await fetchText(src, 8000); }
+    catch { continue; }
+
+    // 1. Locate the crypto chunk: it defines `E="..."` and calls AES.decrypt,
+    //    referencing c=r(NNN) where c.gJ is used to derive the AES key.
+    const eMatch = js.match(/let\s+E\s*=\s*["']([^"']+)["']\s*,\s*S\s*=\s*\[\s*c\.gJ/);
+    if (!eMatch) continue;
+
+    const auth = eMatch[1]; // AUTH token (E) — sama dengan yang dipakai di POST body
+
+    // 2. Find c = r(NNN)
+    const cBind = js.match(/(?<![.\w$])c\s*=\s*(?:r|n)\((\d+)\)/);
+    if (!cBind) continue;
+    const modNum = cBind[1];
+
+    // 3. Fetch the module chunk that contains module NNN and extract gJ/QU
+    let gJ = null, QU = null;
+    for (const otherSrc of srcs) {
+      let other;
+      try { other = await fetchText(otherSrc, 8000); }
+      catch { continue; }
+
+      const modPat = new RegExp(`\\b${modNum}\\s*:\\s*function`);
+      if (!modPat.test(other)) continue;
+
+      const gJm = other.match(/let\s+\w+\s*=\s*\{[^{}]*?\}/g);
+      // Direct approach: search for `gJ:function(){return X}` then X="..."
+      const gJref = other.match(/gJ\s*:\s*function\s*\(\s*\)\s*\{\s*return\s+([A-Za-z_$][\w$]*)/);
+      const QUref = other.match(/QU\s*:\s*function\s*\(\s*\)\s*\{\s*return\s+([A-Za-z_$][\w$]*)/);
+
+      if (gJref) {
+        const nm = gJref[1];
+        const val = other.match(new RegExp(`(?:let|const|var)\\s+${nm}\\s*=\\s*["']([^"']+)["']`));
+        if (val) gJ = val[1];
+      }
+      if (QUref) {
+        const nm = QUref[1];
+        const val = other.match(new RegExp(`(?:let|const|var)\\s+${nm}\\s*=\\s*["']([^"']+)["']`));
+        if (val) QU = val[1];
+      }
+      if (gJ) break;
     }
 
-    const patterns = [
-      /auth["']?\s*[:=]\s*["'](2025\d{4}[a-z0-9]{6,})["']/i,
-      /["'](2025\d{4}[a-z0-9]{6,})["']/i,
-      /(2025\d{4}[a-z0-9]{6,})/i,
-    ];
+    if (!gJ) continue;
 
-    for (const u of jsUrls) {
-      try {
-        const jsRes = await fetch(u, {
-          headers: { 'user-agent': UA },
-          signal: AbortSignal.timeout(5000),
-        });
-        const js = await jsRes.text();
-        for (const p of patterns) {
-          const match = js.match(p);
-          if (match?.[1]) return match[1];
-        }
-      } catch {}
-    }
-  } catch {}
+    // 4. Recompute AES-256 key = gJ + E + E + E (32 bytes)
+    const keyStr = gJ + auth + auth + auth;
+    if (keyStr.length !== 32) continue;
+
+    return { auth, key: Buffer.from(keyStr, 'utf8'), source: 'scrape' };
+  }
   return null;
 }
 
-async function getToken(forceRefresh = false) {
+async function getCredentials(forceRefresh = false) {
   const now = Date.now();
-  if (!forceRefresh && cachedToken && (now - cachedAt) < CACHE_TTL) return cachedToken;
-  const fresh = await scrapeToken();
-  cachedToken = fresh || cachedToken || FALLBACK_TOKEN;
-  cachedAt = now;
-  return cachedToken;
+  if (!forceRefresh && cachedCred && now - cachedCredAt < CRED_TTL_MS) {
+    return cachedCred;
+  }
+  try {
+    const fresh = await scrapeCredentials();
+    if (fresh) {
+      cachedCred = fresh;
+      cachedCredAt = now;
+      return fresh;
+    }
+  } catch { /* fallback */ }
+  cachedCred = HARDCODED;
+  cachedCredAt = now;
+  return cachedCred;
 }
 
-// ---- utils ---------------------------------------------------------------
+// --- utils ----------------------------------------------------------------
 
-const jsonOut = (data, status = 200) =>
-  new Response(JSON.stringify(data), {
-    status,
+const jsonOut = (d, s = 200) =>
+  new Response(JSON.stringify(d), {
+    status: s,
     headers: { ...CORS, 'content-type': 'application/json; charset=utf-8' },
   });
 
-const b64urlEnc = (s) => Buffer.from(s, 'utf8').toString('base64url');
-const b64urlDec = (s) => Buffer.from(s, 'base64url').toString('utf8');
+const b64urlEnc = s => Buffer.from(s, 'utf8').toString('base64url');
+const b64urlDec = s => Buffer.from(s, 'base64url').toString('utf8');
+
+function decrypt(b64, key) {
+  const ct = Buffer.from(b64, 'base64');
+  const iv = key.subarray(0, 16);
+  const d = crypto.createDecipheriv('aes-256-cbc', key, iv);
+  d.setAutoPadding(false);
+  let pt = Buffer.concat([d.update(ct), d.final()]);
+  let end = pt.length;
+  while (end > 0 && pt[end - 1] === 0) end--;
+  return pt.subarray(0, end).toString('utf8');
+}
 
 function normalizeIgUrl(input) {
   const u = new URL(input);
@@ -96,16 +156,15 @@ function normalizeIgUrl(input) {
   return u.toString();
 }
 
-// ---- upstream ------------------------------------------------------------
+// --- upstream -------------------------------------------------------------
 
-async function parseUpstream(link, token) {
+async function parseUpstream(link, cred) {
   const body = new URLSearchParams({
-    auth: token,
+    auth: cred.auth,
     domain: 'api-ak.savefromins.com',
     origin: 'source',
     link,
   });
-
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: {
@@ -118,20 +177,43 @@ async function parseUpstream(link, token) {
       origin: BASE,
       referer: BASE + '/',
       'accept-language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-      'x-forwarded-for': '103.47.132.1',
-      'x-real-ip': '103.47.132.1',
     },
     body,
     signal: AbortSignal.timeout(20000),
   });
-
-  if (!res.ok) throw new Error(`upstream parse http ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(`upstream http ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   const j = await res.json();
-  if (!j.data) throw new Error(`upstream no data: ${JSON.stringify(j).slice(0, 200)}`);
-  return j.data; // raw parsed data (no decrypt needed di v2)
+  if (!j.data) throw new Error(`no data: ${JSON.stringify(j).slice(0, 200)}`);
+
+  const plain = decrypt(j.data, cred.key);
+  try {
+    return JSON.parse(plain);
+  } catch {
+    throw new Error(`decrypt ok but not JSON: ${plain.slice(0, 200)}`);
+  }
 }
 
-// ---- extract streams -----------------------------------------------------
+async function parseWithAutoHeal(link) {
+  // Attempt 1: cached credentials
+  let cred = await getCredentials();
+  try {
+    return await parseUpstream(link, cred);
+  } catch (e1) {
+    const isAuthErr = [401, 403, 410, 412].includes(e1.status);
+    const isDecryptErr = /decrypt|not JSON|no data/i.test(e1.message || '');
+    if (!isAuthErr && !isDecryptErr) throw e1;
+
+    // Attempt 2: force re-scrape credentials (token atau key berubah)
+    cred = await getCredentials(true);
+    return await parseUpstream(link, cred);
+  }
+}
+
+// --- extract --------------------------------------------------------------
 
 function inferType(s) {
   if (!s) return 'video';
@@ -149,106 +231,109 @@ function pickStr(n, keys) {
   return null;
 }
 
+function buildProxyUrl(n) {
+  const p = new URLSearchParams();
+  p.set('request', String(n.request));
+  p.set('sign', String(n.sign));
+  if (n.t != null) p.set('t', String(n.t));
+  return `https://api-ak.savefromins.com/api/gateway/proxy/stream?${p}`;
+}
+
 function extractStreams(root) {
   const out = [];
   const seen = new Set();
-
-  // Coba ambil dari resources langsung
-  const info = root?.data || root;
-  let resources = info?.resources || [];
-
-  if (resources.length === 0 && Array.isArray(info?.media)) {
-    for (const m of info.media) {
-      if (Array.isArray(m.resources)) resources.push(...m.resources);
-    }
-  }
-
-  for (const r of resources) {
-    const url = r.download_url;
-    if (!url || !url.startsWith('http') || seen.has(url)) continue;
-    seen.add(url);
-    out.push({
-      url,
-      type: inferType(url),
-      thumbnail: pickStr(r, ['thumbnail', 'thumb', 'cover', 'poster']) || info?.thumbnail || null,
-      t: 0,
-    });
-  }
-
-  // Fallback: walk seluruh object cari URL media
-  if (out.length === 0) {
-    const walk = (n) => {
-      if (!n || typeof n !== 'object') return;
-      if (Array.isArray(n)) { n.forEach(walk); return; }
-      const direct = pickStr(n, ['download_url', 'downloadUrl', 'video_url', 'videoUrl', 'url', 'src', 'play']);
+  const walk = n => {
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (n.request && n.sign) {
+      const url = buildProxyUrl(n);
+      if (!seen.has(url)) {
+        seen.add(url);
+        out.push({
+          url,
+          type: n.type || n.media_type || inferType(n.request),
+          thumbnail: pickStr(n, ['thumbnail', 'thumb', 'cover', 'poster']),
+          t: Number(n.t) || 0,
+        });
+      }
+    } else {
+      const direct = pickStr(n, [
+        'download_url', 'downloadUrl',
+        'video_url', 'videoUrl',
+        'url', 'src', 'play',
+      ]);
       if (direct && /^https?:\/\//i.test(direct) && !seen.has(direct)) {
         if (/(cdninstagram|fbcdn|savefromins|\.mp4|\.jpg|\.jpeg|\.png|\.webp)/i.test(direct)) {
           seen.add(direct);
-          out.push({ url: direct, type: inferType(direct), thumbnail: null, t: 0 });
+          out.push({
+            url: direct,
+            type: n.type || n.media_type || inferType(direct),
+            thumbnail: pickStr(n, ['thumbnail', 'thumb', 'cover', 'poster']),
+            t: Number(n.t) || 0,
+          });
         }
       }
-      for (const v of Object.values(n)) {
-        if (v && typeof v === 'object') walk(v);
-      }
-    };
-    walk(root);
-  }
-
-  // Video duluan
-  out.sort((a, b) => (b.type === 'video' ? 1 : -1));
+    }
+    for (const v of Object.values(n)) {
+      if (v && typeof v === 'object') walk(v);
+    }
+  };
+  walk(root);
   return out;
 }
 
-// ---- resolve streams -----------------------------------------------------
-
-async function resolveStreams(link, forceRefresh = false) {
-  const token = await getToken(forceRefresh);
-  const data = await parseUpstream(link, token);
-  const streams = extractStreams(data);
-  return { streams, data };
-}
-
-// ---- download ------------------------------------------------------------
+// --- download -------------------------------------------------------------
 
 const STREAM_HEADERS = {
   'user-agent': UA,
   'sec-ch-ua-platform': '"Android"',
   'sec-ch-ua': '"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"',
   'sec-ch-ua-mobile': '?1',
-  accept: 'video/mp4,video/*;q=0.9,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+  accept:
+    'video/mp4,video/*;q=0.9,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
   referer: BASE + '/',
   'accept-language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
 };
+
+async function resolveStreams(link) {
+  const data = await parseWithAutoHeal(link);
+  return extractStreams(data);
+}
 
 async function handleDownload(sp) {
   try {
     const ig = sp.get('ig');
     const idx = Number(sp.get('i') || 0);
     if (!ig) return new Response('ig required', { status: 400, headers: CORS });
-    if (!Number.isInteger(idx) || idx < 0) return new Response('i invalid', { status: 400, headers: CORS });
+    if (!Number.isInteger(idx) || idx < 0) {
+      return new Response('i invalid', { status: 400, headers: CORS });
+    }
 
     const link = normalizeIgUrl(b64urlDec(ig));
-    let { streams } = await resolveStreams(link);
+    let streams = await resolveStreams(link);
+    if (idx >= streams.length) {
+      return new Response('index out of range', { status: 404, headers: CORS });
+    }
 
-    if (idx >= streams.length) return new Response('index out of range', { status: 404, headers: CORS });
+    let upstream = await fetch(streams[idx].url, { headers: STREAM_HEADERS, redirect: 'follow' });
 
-    let target = streams[idx].url;
-    let upstream = await fetch(target, { headers: STREAM_HEADERS, redirect: 'follow' });
-
-    // Auto-heal: token expired → re-scrape → retry
     if ([401, 403, 410, 412].includes(upstream.status)) {
-      ({ streams } = await resolveStreams(link, true));
-      if (idx >= streams.length) return new Response('index out of range after refresh', { status: 404, headers: CORS });
-      target = streams[idx].url;
-      upstream = await fetch(target, { headers: STREAM_HEADERS, redirect: 'follow' });
+      streams = await resolveStreams(link);
+      if (idx >= streams.length) {
+        return new Response('index out of range after refresh', { status: 404, headers: CORS });
+      }
+      upstream = await fetch(streams[idx].url, { headers: STREAM_HEADERS, redirect: 'follow' });
     }
 
     if (!upstream.ok) {
       const body = await upstream.text().catch(() => '');
-      return new Response(`upstream ${upstream.status}: ${body.slice(0, 200)}`, { status: 502, headers: CORS });
+      return new Response(`upstream ${upstream.status}: ${body.slice(0, 200)}`, {
+        status: 502, headers: CORS,
+      });
     }
 
-    const shortcode = (link.match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/) || [null, 'media'])[1];
+    const shortcode =
+      (link.match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/) || [null, 'media'])[1];
     const ct = upstream.headers.get('content-type') || 'video/mp4';
     const ext = ct.includes('image') ? 'jpg' : 'mp4';
 
@@ -280,7 +365,7 @@ async function handleDownload(sp) {
   }
 }
 
-// ---- parse ---------------------------------------------------------------
+// --- parse ----------------------------------------------------------------
 
 async function handleParse(req, u) {
   try {
@@ -294,26 +379,17 @@ async function handleParse(req, u) {
     } else {
       return jsonOut({ ok: false, error: 'method not allowed' }, 405);
     }
-
     if (!link) return jsonOut({ ok: false, error: 'url required' }, 400);
 
     const clean = normalizeIgUrl(link);
-
-    // Attempt 1
-    let token = await getToken();
-    let raw = await parseUpstream(clean, token);
-    let streams = extractStreams(raw);
-
-    // Attempt 2 — refresh token jika gagal
-    if (!streams.length) {
-      token = await getToken(true);
-      await new Promise(r => setTimeout(r, 800));
-      raw = await parseUpstream(clean, token);
-      streams = extractStreams(raw);
-    }
+    const data = await parseWithAutoHeal(clean);
+    const streams = extractStreams(data);
 
     if (!streams.length) {
-      return jsonOut({ ok: false, error: 'no media found', preview: JSON.stringify(raw).slice(0, 400) }, 422);
+      return jsonOut(
+        { ok: false, error: 'no media found', preview: JSON.stringify(data).slice(0, 400) },
+        422
+      );
     }
 
     const proto = req.headers.get('x-forwarded-proto') || 'https';
@@ -322,22 +398,19 @@ async function handleParse(req, u) {
     const ig64 = b64urlEnc(clean);
     const now = Math.floor(Date.now() / 1000);
 
-    const info = raw?.data || raw;
-
     return jsonOut({
       ok: true,
       source: 'savefromins',
       instagram_url: clean,
-      title: typeof info?.title === 'string' ? info.title.trim().slice(0, 120) : null,
-      thumbnail: info?.thumbnail || streams[0]?.thumbnail || null,
-      username: info?.user_item?.nickname || null,
+      title: typeof data.title === 'string' ? data.title.trim().slice(0, 120) : null,
+      thumbnail: data.thumbnail || streams[0]?.thumbnail || null,
       count: streams.length,
       media: streams.map((s, i) => ({
         index: i,
         type: s.type,
         thumbnail: s.thumbnail || null,
         expires_at: s.t || null,
-        expires_in: s.t ? Math.max(0, s.t - now) : null,
+        expires_in: s.t ? Math.max(0, now ? 0 : 0, s.t - now) : null,
         download: `${self}?ig=${encodeURIComponent(ig64)}&i=${i}`,
       })),
     });
@@ -346,11 +419,11 @@ async function handleParse(req, u) {
   }
 }
 
-// ---- entry ---------------------------------------------------------------
+// --- entry ----------------------------------------------------------------
 
 export default async function handler(req) {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
   const u = new URL(req.url);
   if (u.searchParams.has('ig')) return handleDownload(u.searchParams);
   return handleParse(req, u);
-}
+  }
