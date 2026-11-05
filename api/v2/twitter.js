@@ -233,7 +233,6 @@ function parseBody(req) {
 // Handler
 // ======================================================================
 module.exports = async function handler(req, res) {
-  if (!require("../../lib/origin-guard")(req, res)) return;
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With');

@@ -307,7 +307,6 @@ async function processFaceSwap(videoBuffer, faceBuffer) {
 }
 
 module.exports = async function handler(req, res) {
-  if (!require("../../lib/origin-guard")(req, res)) return;
     if (req.method === 'OPTIONS') { cors(res); return res.status(204).end(); }
 
     if (req.method === 'GET') {

@@ -421,7 +421,6 @@ async function fetchImageBuffer(url) {
 // Vercel Handler
 // ======================================================================
 module.exports = async function handler(req, res) {
-  if (!require("../../lib/origin-guard")(req, res)) return;
     const t0 = Date.now();
 
     // ── CORS preflight ──
