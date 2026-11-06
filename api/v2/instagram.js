@@ -53,7 +53,7 @@ function inferType(url, extra) {
   return 'video';
 }
 
-// ── 1. SAVEVID.NET PARSER (Primary - Berdasarkan cURL dari lu) ──
+// ── 1. SAVEVID.NET PARSER (Primary - Lebih Tangguh) ──
 async function parseSavevid(link) {
   const jar = new CookieJar();
   const client = wrapper(axios.create({
@@ -68,10 +68,27 @@ async function parseSavevid(link) {
   }));
 
   try {
-    // 1. Warm up buat dapet cookie fpestid
-    await client.get('https://savevid.net/id');
+    // 1. Warm-up: kunjungi halaman utama untuk mendapatkan cookie fpestid
+    const warmUpRes = await client.get('https://savevid.net/id');
+    const warmUpCookies = await jar.getCookies('https://savevid.net');
+    const fpestidCookie = warmUpCookies.find(c => c.key === 'fpestid');
+    
+    if (!fpestidCookie) {
+        // Jika cookie tidak ditemukan, coba set manual dari header 'set-cookie' jika ada
+        const setCookie = warmUpRes.headers['set-cookie'];
+        if (setCookie) {
+            setCookie.forEach(c => {
+                if (c.startsWith('fpestid=')) {
+                    const value = c.split(';')[0].split('=')[1];
+                    jar.setCookie(`fpestid=${value}; Domain=.savevid.net; Path=/`, 'https://savevid.net');
+                }
+            });
+        }
+    }
+    // Beri jeda singkat agar cookie diproses
+    await new Promise(r => setTimeout(r, 1000));
 
-    // 2. Hit userverify buat dapet cftoken
+    // 2. Minta cftoken
     const verifyRes = await client.post('https://savevid.net/api/userverify', 
       new URLSearchParams({ url: link }).toString(), 
       {
@@ -85,21 +102,29 @@ async function parseSavevid(link) {
     );
 
     let cftoken = '';
-    let verifyData = verifyRes.data;
-    if (typeof verifyData === 'string') {
-      try { verifyData = JSON.parse(verifyData); } catch (_) {}
-    }
+    const verifyData = verifyRes.data;
 
-    if (verifyData && verifyData.cftoken) {
+    // Coba ekstrak dari JSON
+    if (verifyData && typeof verifyData === 'object' && verifyData.cftoken) {
       cftoken = verifyData.cftoken;
-    } else if (typeof verifyRes.data === 'string') {
-      const match = verifyRes.data.match(/cftoken["']?:\s*["']([^"']+)/);
-      if (match) cftoken = match[1];
+    } 
+    // Fallback: ekstrak dari string (JSON string atau HTML)
+    else if (typeof verifyData === 'string') {
+      const jsonMatch = verifyData.match(/"cftoken"\s*:\s*"([^"]+)"/);
+      if (jsonMatch) cftoken = jsonMatch[1];
+      else {
+        const htmlMatch = verifyData.match(/cftoken["']?\s*:\s*["']([^"']+)/);
+        if (htmlMatch) cftoken = htmlMatch[1];
+      }
     }
 
-    if (!cftoken) throw new Error('Gagal mendapatkan cftoken dari savevid.net');
+    if (!cftoken) {
+        // Tampilkan snippet response untuk debugging
+        const debugSnippet = typeof verifyData === 'string' ? verifyData.slice(0, 200) : JSON.stringify(verifyData).slice(0, 200);
+        throw new Error(`Gagal mendapatkan cftoken. Response: ${debugSnippet}`);
+    }
 
-    // 3. Hit ajaxSearch buat dapet link media
+    // 3. Minta hasil pencarian media
     const searchBody = new URLSearchParams({
       q: link,
       t: 'media',
@@ -117,22 +142,25 @@ async function parseSavevid(link) {
       }
     });
 
-    const html = searchRes.data.data || searchRes.data;
-    if (typeof html !== 'string') throw new Error('Response savevid.net tidak valid');
+    // Ekstrak HTML dari response (bisa berupa objek dengan field 'data' atau string langsung)
+    const html = (typeof searchRes.data === 'object' && searchRes.data.data) 
+                 ? searchRes.data.data 
+                 : searchRes.data;
+    
+    if (typeof html !== 'string' || !html.includes('href')) {
+        throw new Error('Response savevid.net tidak berisi link media yang valid.');
+    }
 
-    // 4. Extract Links (menggunakan regex untuk cari href atau url media)
+    // 4. Ekstrak link media
     const streams = [];
     const seen = new Set();
-
-    // Regex untuk nangkep link download (biasanya dari snapcdn atau fbcdn)
-    const urlRegex = /(https:\/\/[^"'\s\\]+)/g;
+    const urlRegex = /https:\/\/[^"'\s\\]+/g;
     let m;
     while ((m = urlRegex.exec(html)) !== null) {
-      let url = m[1].replace(/&amp;/g, '&');
+      let url = m[0].replace(/&amp;/g, '&');
       
-      // Filter URL yang gak relevan
-      if (url.includes('savevid.net') && !url.includes('/api/download')) continue;
-      if (url.includes('google') || url.includes('facebook.com/')) continue;
+      // Filter domain yang tidak relevan
+      if (/savevid|google|facebook\.com/i.test(url)) continue;
       if (!/(snapcdn|fbcdn|cdninstagram|\.mp4|\.jpg|\.jpeg|\.png|\.webp)/i.test(url)) continue;
       
       if (seen.has(url)) continue;
@@ -145,12 +173,14 @@ async function parseSavevid(link) {
       });
     }
 
-    if (!streams.length) throw new Error('Media tidak ditemukan di halaman savevid.net');
+    if (!streams.length) {
+        throw new Error('Media tidak ditemukan di halaman savevid.net.');
+    }
 
     // Urutkan video paling atas
     streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
     
-    // Cari thumbnail (opsional)
+    // Set thumbnail (jika ada)
     const thumbMatch = html.match(/<img[^>]+src="([^"]+)"/i);
     if (thumbMatch) {
       const t = thumbMatch[1];
