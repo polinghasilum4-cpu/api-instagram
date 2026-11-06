@@ -1,10 +1,12 @@
 // api/v2/instagram.js
-// Parse: iqsaved.com (Primary) -> Native Embed (Fallback) -> Savefromins (Fallback)
+// Parse: Cobalt -> JerryCoder -> Reelflow -> Native -> Savefromins
 // Download: selalu lewat API ini (?ig=&i=) biar tetap di domain user
 
 const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
+const { instagram: jerryCoderInstagram } = require('@jerrycoder/instagram-api');
+const reelflow = require('reelflow');
 
 const UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Mobile Safari/537.36';
 
@@ -53,89 +55,85 @@ function inferType(url, extra) {
   return 'video';
 }
 
-// ── 1. IQSAVED.COM PARSER (Primary - Berdasarkan cURL dari lu) ──
-async function parseIqsaved(link) {
-  const jar = new CookieJar();
-  const client = wrapper(axios.create({
-    jar,
+// ── 1. COBALT API (Primary) ──
+async function parseCobalt(link) {
+  const res = await axios.post('https://api.cobalt.tools/api/json', {
+    url: link
+  }, {
     headers: {
-      'User-Agent': UA,
-      'Accept': '*/*',
-      'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': UA
     },
-    timeout: 30000,
+    timeout: 20000,
     validateStatus: () => true
-  }));
+  });
 
-  try {
-    const shortcodeMatch = link.match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
-    if (!shortcodeMatch) throw new Error('Shortcode tidak ditemukan');
-    const shortcode = shortcodeMatch[1];
+  const data = res.data;
+  if (!data) throw new Error('Response Cobalt kosong');
 
-    // 1. Warm up buat dapet cookie PHPSESSID
-    await client.get('https://iqsaved.com/');
-
-    // 2. Hit endpoint POST download
-    const postUrl = `https://iqsaved.com/download-reels/${shortcode}/`;
-    const res = await client.post(postUrl, 
-      new URLSearchParams({ url: link }).toString(), 
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Origin': 'https://iqsaved.com',
-          'Referer': postUrl,
-          'Upgrade-Insecure-Requests': '1'
-        }
-      }
-    );
-
-    const html = res.data;
-    if (typeof html !== 'string') throw new Error('Response iqsaved bukan HTML');
-
-    // 3. Ekstrak URL media dari HTML
-    const streams = [];
-    const seen = new Set();
-    
-    // Regex buat nangkep semua href
-    const urlRegex = /href="(https:\/\/[^"]+)"/g;
-    let m;
-    while ((m = urlRegex.exec(html)) !== null) {
-      let url = m[1].replace(/&amp;/g, '&');
-      
-      // Filter URL
-      if (/iqsaved|google|facebook\.com|instagram\.com/i.test(url)) continue;
-      if (!/(snapcdn|fbcdn|cdninstagram|\.mp4|\.jpg|\.jpeg|\.png|\.webp)/i.test(url)) continue;
-      
-      if (seen.has(url)) continue;
-      seen.add(url);
-      
-      streams.push({ 
-        url, 
-        type: inferType(url, html), 
-        thumbnail: null 
-      });
-    }
-
-    if (!streams.length) throw new Error('Media tidak ditemukan di iqsaved');
-
-    // Urutkan video di atas
-    streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
-    
-    // Cari thumbnail dari og:image atau img src (opsional)
-    const thumbMatch = html.match(/<img[^>]+src="([^"]+)"/i);
-    if (thumbMatch) {
-      const t = thumbMatch[1];
-      for (const s of streams) s.thumbnail = t;
-    }
-
-    return { streams, source: 'iqsaved' };
-
-  } catch (e) {
-    throw new Error('iqsaved error: ' + e.message);
+  if (data.status === 'error') {
+    throw new Error(data.text || 'Cobalt error');
   }
+
+  if (data.status === 'redirect' || data.status === 'success' || data.status === 'stream') {
+    const streams = [{
+      url: data.url,
+      type: inferType(data.url),
+      thumbnail: null
+    }];
+    streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
+    return { streams, source: 'cobalt' };
+  }
+
+  if (data.status === 'picker' && Array.isArray(data.picker)) {
+    const streams = data.picker.map(item => ({
+      url: item.url,
+      type: inferType(item.url),
+      thumbnail: item.thumb || null
+    }));
+    streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
+    return { streams, source: 'cobalt' };
+  }
+
+  throw new Error('Struktur response Cobalt tidak dikenali');
 }
 
-// ── 2. NATIVE PARSER (Fallback 1) ──
+// ── 2. JERRYCODER API (Fallback 1) ──
+async function parseJerryCoder(link) {
+  const data = await jerryCoderInstagram(link);
+  if (!data || data.status !== 'success' || !data.data) {
+    throw new Error('JerryCoder gagal atau response tidak valid');
+  }
+
+  const mediaData = data.data;
+  const url = mediaData.url || mediaData.videoUrl;
+  if (!url) throw new Error('Tidak ada URL media dari JerryCoder');
+
+  const streams = [{
+    url: url,
+    type: inferType(url),
+    thumbnail: mediaData.thumbnail || null
+  }];
+  streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
+  return { streams, source: 'jerrycoder' };
+}
+
+// ── 3. REELFLOW (Fallback 2) ──
+async function parseReelflow(link) {
+  const videoInfo = await reelflow.getVideoInfo(link);
+  if (!videoInfo || !videoInfo.videoUrl) {
+    throw new Error('Reelflow tidak menemukan video');
+  }
+  const streams = [{
+    url: videoInfo.videoUrl,
+    type: 'video',
+    thumbnail: null
+  }];
+  return { streams, source: 'reelflow' };
+}
+
+// ── 4. NATIVE PARSER (Fallback 3) ──
 async function parseNative(link) {
   const shortcodeMatch = link.match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
   if (!shortcodeMatch) throw new Error('Shortcode tidak ditemukan di URL');
@@ -196,7 +194,7 @@ async function parseNative(link) {
   throw lastErr || new Error('Native parse gagal');
 }
 
-// ── 3. SAVEFROMINS PARSER (Fallback 2) ──
+// ── 5. SAVEFROMINS PARSER (Fallback 4) ──
 const SF_BASE = 'https://savefromins.com';
 const SF_API = 'https://api.savefromins.com/api/contentsite_api/media/parse';
 let cachedToken = null;
@@ -266,33 +264,39 @@ async function parseSavefromins(link) {
   throw new Error('savefromins gagal');
 }
 
-// ── RESOLVER UTAMA (Iqsaved -> Native -> Savefromins) ──
+// ── RESOLVER UTAMA ──
 async function resolveMedia(link) {
   const errors = [];
-  
-  // 1. Iqsaved.com (Paling ngebut & jarang kena blokir)
-  try { 
-    console.log('[IG] Mencoba Iqsaved...');
-    return await parseIqsaved(link); 
-  } catch (e) { 
-    errors.push(`Iqsaved: ${e.message}`); 
-  }
 
-  // 2. Native Embed
-  try { 
+  // 1. Cobalt API
+  try {
+    console.log('[IG] Mencoba Cobalt...');
+    return await parseCobalt(link);
+  } catch (e) { errors.push(`Cobalt: ${e.message}`); }
+
+  // 2. JerryCoder
+  try {
+    console.log('[IG] Mencoba JerryCoder...');
+    return await parseJerryCoder(link);
+  } catch (e) { errors.push(`JerryCoder: ${e.message}`); }
+
+  // 3. Reelflow
+  try {
+    console.log('[IG] Mencoba Reelflow...');
+    return await parseReelflow(link);
+  } catch (e) { errors.push(`Reelflow: ${e.message}`); }
+
+  // 4. Native Embed
+  try {
     console.log('[IG] Mencoba Native Parser...');
-    return await parseNative(link); 
-  } catch (e) { 
-    errors.push(`Native: ${e.message}`); 
-  }
+    return await parseNative(link);
+  } catch (e) { errors.push(`Native: ${e.message}`); }
 
-  // 3. Savefromins
-  try { 
+  // 5. Savefromins
+  try {
     console.log('[IG] Mencoba Savefromins...');
-    return await parseSavefromins(link); 
-  } catch (e) { 
-    errors.push(`Savefromins: ${e.message}`); 
-  }
+    return await parseSavefromins(link);
+  } catch (e) { errors.push(`Savefromins: ${e.message}`); }
 
   throw new Error(errors.join(' | '));
 }
@@ -313,7 +317,7 @@ async function handleDownload(req, res, q) {
     headers: {
       'user-agent': UA,
       accept: '*/*',
-      referer: target.includes('iqsaved') ? 'https://iqsaved.com/' : 'https://www.instagram.com/',
+      referer: 'https://www.instagram.com/',
     },
     redirect: 'follow',
     signal: AbortSignal.timeout(55000),
@@ -391,7 +395,6 @@ module.exports = async (req, res) => {
       format: s.type === 'image' ? 'jpg' : 'mp4',
     }));
 
-    // Dual format: ok/media (baru) + status/data.resources (frontend lama)
     return json(res, {
       ok: true,
       status: true,
