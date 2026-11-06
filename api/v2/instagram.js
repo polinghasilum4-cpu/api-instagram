@@ -1,5 +1,5 @@
 // api/v2/instagram.js
-// Parse: savevid.net (Primary) -> Native Embed (Fallback) -> Savefromins (Fallback)
+// Parse: iqsaved.com (Primary) -> Native Embed (Fallback) -> Savefromins (Fallback)
 // Download: selalu lewat API ini (?ig=&i=) biar tetap di domain user
 
 const axios = require('axios');
@@ -53,8 +53,8 @@ function inferType(url, extra) {
   return 'video';
 }
 
-// ── 1. SAVEVID.NET PARSER (Primary - Lebih Tangguh) ──
-async function parseSavevid(link) {
+// ── 1. IQSAVED.COM PARSER (Primary - Berdasarkan cURL dari lu) ──
+async function parseIqsaved(link) {
   const jar = new CookieJar();
   const client = wrapper(axios.create({
     jar,
@@ -68,99 +68,42 @@ async function parseSavevid(link) {
   }));
 
   try {
-    // 1. Warm-up: kunjungi halaman utama untuk mendapatkan cookie fpestid
-    const warmUpRes = await client.get('https://savevid.net/id');
-    const warmUpCookies = await jar.getCookies('https://savevid.net');
-    const fpestidCookie = warmUpCookies.find(c => c.key === 'fpestid');
-    
-    if (!fpestidCookie) {
-        // Jika cookie tidak ditemukan, coba set manual dari header 'set-cookie' jika ada
-        const setCookie = warmUpRes.headers['set-cookie'];
-        if (setCookie) {
-            setCookie.forEach(c => {
-                if (c.startsWith('fpestid=')) {
-                    const value = c.split(';')[0].split('=')[1];
-                    jar.setCookie(`fpestid=${value}; Domain=.savevid.net; Path=/`, 'https://savevid.net');
-                }
-            });
-        }
-    }
-    // Beri jeda singkat agar cookie diproses
-    await new Promise(r => setTimeout(r, 1000));
+    const shortcodeMatch = link.match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+    if (!shortcodeMatch) throw new Error('Shortcode tidak ditemukan');
+    const shortcode = shortcodeMatch[1];
 
-    // 2. Minta cftoken
-    const verifyRes = await client.post('https://savevid.net/api/userverify', 
+    // 1. Warm up buat dapet cookie PHPSESSID
+    await client.get('https://iqsaved.com/');
+
+    // 2. Hit endpoint POST download
+    const postUrl = `https://iqsaved.com/download-reels/${shortcode}/`;
+    const res = await client.post(postUrl, 
       new URLSearchParams({ url: link }).toString(), 
       {
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'x-requested-with': 'XMLHttpRequest',
-          'Origin': 'https://savevid.net',
-          'Referer': 'https://savevid.net/id'
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Origin': 'https://iqsaved.com',
+          'Referer': postUrl,
+          'Upgrade-Insecure-Requests': '1'
         }
       }
     );
 
-    let cftoken = '';
-    const verifyData = verifyRes.data;
+    const html = res.data;
+    if (typeof html !== 'string') throw new Error('Response iqsaved bukan HTML');
 
-    // Coba ekstrak dari JSON
-    if (verifyData && typeof verifyData === 'object' && verifyData.cftoken) {
-      cftoken = verifyData.cftoken;
-    } 
-    // Fallback: ekstrak dari string (JSON string atau HTML)
-    else if (typeof verifyData === 'string') {
-      const jsonMatch = verifyData.match(/"cftoken"\s*:\s*"([^"]+)"/);
-      if (jsonMatch) cftoken = jsonMatch[1];
-      else {
-        const htmlMatch = verifyData.match(/cftoken["']?\s*:\s*["']([^"']+)/);
-        if (htmlMatch) cftoken = htmlMatch[1];
-      }
-    }
-
-    if (!cftoken) {
-        // Tampilkan snippet response untuk debugging
-        const debugSnippet = typeof verifyData === 'string' ? verifyData.slice(0, 200) : JSON.stringify(verifyData).slice(0, 200);
-        throw new Error(`Gagal mendapatkan cftoken. Response: ${debugSnippet}`);
-    }
-
-    // 3. Minta hasil pencarian media
-    const searchBody = new URLSearchParams({
-      q: link,
-      t: 'media',
-      lang: 'id',
-      v: 'v2',
-      cftoken: cftoken
-    }).toString();
-
-    const searchRes = await client.post('https://v3.savevid.net/api/ajaxSearch', searchBody, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'x-requested-with': 'XMLHttpRequest',
-        'Origin': 'https://savevid.net',
-        'Referer': 'https://savevid.net/'
-      }
-    });
-
-    // Ekstrak HTML dari response (bisa berupa objek dengan field 'data' atau string langsung)
-    const html = (typeof searchRes.data === 'object' && searchRes.data.data) 
-                 ? searchRes.data.data 
-                 : searchRes.data;
-    
-    if (typeof html !== 'string' || !html.includes('href')) {
-        throw new Error('Response savevid.net tidak berisi link media yang valid.');
-    }
-
-    // 4. Ekstrak link media
+    // 3. Ekstrak URL media dari HTML
     const streams = [];
     const seen = new Set();
-    const urlRegex = /https:\/\/[^"'\s\\]+/g;
+    
+    // Regex buat nangkep semua href
+    const urlRegex = /href="(https:\/\/[^"]+)"/g;
     let m;
     while ((m = urlRegex.exec(html)) !== null) {
-      let url = m[0].replace(/&amp;/g, '&');
+      let url = m[1].replace(/&amp;/g, '&');
       
-      // Filter domain yang tidak relevan
-      if (/savevid|google|facebook\.com/i.test(url)) continue;
+      // Filter URL
+      if (/iqsaved|google|facebook\.com|instagram\.com/i.test(url)) continue;
       if (!/(snapcdn|fbcdn|cdninstagram|\.mp4|\.jpg|\.jpeg|\.png|\.webp)/i.test(url)) continue;
       
       if (seen.has(url)) continue;
@@ -173,24 +116,22 @@ async function parseSavevid(link) {
       });
     }
 
-    if (!streams.length) {
-        throw new Error('Media tidak ditemukan di halaman savevid.net.');
-    }
+    if (!streams.length) throw new Error('Media tidak ditemukan di iqsaved');
 
-    // Urutkan video paling atas
+    // Urutkan video di atas
     streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
     
-    // Set thumbnail (jika ada)
+    // Cari thumbnail dari og:image atau img src (opsional)
     const thumbMatch = html.match(/<img[^>]+src="([^"]+)"/i);
     if (thumbMatch) {
       const t = thumbMatch[1];
       for (const s of streams) s.thumbnail = t;
     }
 
-    return { streams, source: 'savevid' };
+    return { streams, source: 'iqsaved' };
 
   } catch (e) {
-    throw new Error('savevid.net error: ' + e.message);
+    throw new Error('iqsaved error: ' + e.message);
   }
 }
 
@@ -325,16 +266,16 @@ async function parseSavefromins(link) {
   throw new Error('savefromins gagal');
 }
 
-// ── RESOLVER UTAMA (Savevid -> Native -> Savefromins) ──
+// ── RESOLVER UTAMA (Iqsaved -> Native -> Savefromins) ──
 async function resolveMedia(link) {
   const errors = [];
   
-  // 1. Savevid.net (Paling ngebut & jarang down)
+  // 1. Iqsaved.com (Paling ngebut & jarang kena blokir)
   try { 
-    console.log('[IG] Mencoba Savevid.net...');
-    return await parseSavevid(link); 
+    console.log('[IG] Mencoba Iqsaved...');
+    return await parseIqsaved(link); 
   } catch (e) { 
-    errors.push(`Savevid: ${e.message}`); 
+    errors.push(`Iqsaved: ${e.message}`); 
   }
 
   // 2. Native Embed
@@ -372,7 +313,7 @@ async function handleDownload(req, res, q) {
     headers: {
       'user-agent': UA,
       accept: '*/*',
-      referer: target.includes('savevid') ? 'https://savevid.net/' : 'https://www.instagram.com/',
+      referer: target.includes('iqsaved') ? 'https://iqsaved.com/' : 'https://www.instagram.com/',
     },
     redirect: 'follow',
     signal: AbortSignal.timeout(55000),
