@@ -1,14 +1,13 @@
 // api/v2/instagram.js
-// Parse: Cobalt -> JerryCoder -> Reelflow -> Native -> Savefromins
+// Parse: igexport.com (Primary) -> Native Embed (Fallback) -> Savefromins (Fallback)
 // Download: selalu lewat API ini (?ig=&i=) biar tetap di domain user
+// scrape by: xs0cietyHUB/xs0ciety505
 
 const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
-const { instagram: jerryCoderInstagram } = require('@jerrycoder/instagram-api');
-const reelflow = require('reelflow');
 
-const UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Mobile Safari/537.36';
+const UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36';
 
 const ALLOWED_ORIGINS = [
   'https://xs0cietylabsz.biz.id',
@@ -55,85 +54,85 @@ function inferType(url, extra) {
   return 'video';
 }
 
-// ── 1. COBALT API (Primary) ──
-async function parseCobalt(link) {
-  const res = await axios.post('https://api.cobalt.tools/api/json', {
-    url: link
-  }, {
+// ── 1. IGEXPORT PARSER (Primary - Auto Deteksi Foto/Video) ──
+async function parseIgExport(link) {
+  const jar = new CookieJar();
+  const client = wrapper(axios.create({
+    baseURL: 'https://igexport.com',
+    jar: jar,
+    timeout: 30000, // Disesuaikan biar gak kena limit Vercel (max 60s)
     headers: {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': UA
-    },
-    timeout: 20000,
-    validateStatus: () => true
-  });
+      'User-Agent': UA,
+      'Referer': 'https://igexport.com/id/video-download/',
+      'Accept': 'application/json, text/plain, */*',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin'
+    }
+  }));
 
-  const data = res.data;
-  if (!data) throw new Error('Response Cobalt kosong');
+  const lowerUrl = link.toLowerCase();
+  const isReel = lowerUrl.includes('/reel/') || lowerUrl.includes('/tv/') || lowerUrl.includes('/stories/');
+  const endpoint = isReel ? '/api/ig-reels' : '/api/ig-photo';
 
-  if (data.status === 'error') {
-    throw new Error(data.text || 'Cobalt error');
+  // Ambil session cookie
+  await client.get('/id/video-download/');
+
+  // Tembak API
+  const response = await client.get(endpoint, { params: { url: link } });
+  const serverData = response.data;
+
+  if (!serverData) throw new Error('Empty response dari igexport');
+
+  // Ekstraksi URL Media secara rekursif dari JSON response
+  const streams = [];
+  const seen = new Set();
+
+  function extractMedia(obj) {
+    if (!obj) return;
+    if (typeof obj === 'string') {
+      let url = obj.replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+      if (/(fbcdn\.net|cdninstagram\.com|snapcdn|\.mp4|\.jpg|\.jpeg|\.png|\.webp)/i.test(url)) {
+        // Skip thumbnail kecil atau avatar jika ada filter khusus, sementara kita ambil semua dulu
+        if (!seen.has(url)) {
+          seen.add(url);
+          streams.push({ url, type: inferType(url), thumbnail: null });
+        }
+      }
+    } else if (Array.isArray(obj)) {
+      obj.forEach(extractMedia);
+    } else if (typeof obj === 'object') {
+      Object.values(obj).forEach(extractMedia);
+    }
   }
 
-  if (data.status === 'redirect' || data.status === 'success' || data.status === 'stream') {
-    const streams = [{
-      url: data.url,
-      type: inferType(data.url),
-      thumbnail: null
-    }];
-    streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
-    return { streams, source: 'cobalt' };
-  }
+  extractMedia(serverData);
 
-  if (data.status === 'picker' && Array.isArray(data.picker)) {
-    const streams = data.picker.map(item => ({
-      url: item.url,
-      type: inferType(item.url),
-      thumbnail: item.thumb || null
-    }));
-    streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
-    return { streams, source: 'cobalt' };
-  }
+  if (streams.length === 0) throw new Error('Media URL tidak ditemukan di JSON igexport');
 
-  throw new Error('Struktur response Cobalt tidak dikenali');
-}
-
-// ── 2. JERRYCODER API (Fallback 1) ──
-async function parseJerryCoder(link) {
-  const data = await jerryCoderInstagram(link);
-  if (!data || data.status !== 'success' || !data.data) {
-    throw new Error('JerryCoder gagal atau response tidak valid');
-  }
-
-  const mediaData = data.data;
-  const url = mediaData.url || mediaData.videoUrl;
-  if (!url) throw new Error('Tidak ada URL media dari JerryCoder');
-
-  const streams = [{
-    url: url,
-    type: inferType(url),
-    thumbnail: mediaData.thumbnail || null
-  }];
+  // Urutkan video paling atas
   streams.sort((a, b) => (a.type === 'video' ? 0 : 1) - (b.type === 'video' ? 0 : 1));
-  return { streams, source: 'jerrycoder' };
-}
 
-// ── 3. REELFLOW (Fallback 2) ──
-async function parseReelflow(link) {
-  const videoInfo = await reelflow.getVideoInfo(link);
-  if (!videoInfo || !videoInfo.videoUrl) {
-    throw new Error('Reelflow tidak menemukan video');
+  // Ambil thumbnail dari response jika ada (biasanya field 'thumbnail' atau 'thumb')
+  let thumb = null;
+  function findThumb(obj) {
+      if (!obj) return;
+      if (typeof obj === 'object') {
+          if (obj.thumbnail) thumb = obj.thumbnail;
+          if (obj.thumb) thumb = obj.thumb;
+          Object.values(obj).forEach(findThumb);
+      }
   }
-  const streams = [{
-    url: videoInfo.videoUrl,
-    type: 'video',
-    thumbnail: null
-  }];
-  return { streams, source: 'reelflow' };
+  findThumb(serverData);
+
+  if (thumb) {
+      for (const s of streams) s.thumbnail = thumb;
+  }
+
+  return { streams, source: 'igexport' };
 }
 
-// ── 4. NATIVE PARSER (Fallback 3) ──
+// ── 2. NATIVE PARSER (Fallback 1) ──
 async function parseNative(link) {
   const shortcodeMatch = link.match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
   if (!shortcodeMatch) throw new Error('Shortcode tidak ditemukan di URL');
@@ -194,7 +193,7 @@ async function parseNative(link) {
   throw lastErr || new Error('Native parse gagal');
 }
 
-// ── 5. SAVEFROMINS PARSER (Fallback 4) ──
+// ── 3. SAVEFROMINS PARSER (Fallback 2) ──
 const SF_BASE = 'https://savefromins.com';
 const SF_API = 'https://api.savefromins.com/api/contentsite_api/media/parse';
 let cachedToken = null;
@@ -264,39 +263,33 @@ async function parseSavefromins(link) {
   throw new Error('savefromins gagal');
 }
 
-// ── RESOLVER UTAMA ──
+// ── RESOLVER UTAMA (IgExport -> Native -> Savefromins) ──
 async function resolveMedia(link) {
   const errors = [];
+  
+  // 1. IgExport.com (Paling ngebut & stabil)
+  try { 
+    console.log('[IG] Mencoba IgExport...');
+    return await parseIgExport(link); 
+  } catch (e) { 
+    errors.push(`IgExport: ${e.message}`); 
+  }
 
-  // 1. Cobalt API
-  try {
-    console.log('[IG] Mencoba Cobalt...');
-    return await parseCobalt(link);
-  } catch (e) { errors.push(`Cobalt: ${e.message}`); }
-
-  // 2. JerryCoder
-  try {
-    console.log('[IG] Mencoba JerryCoder...');
-    return await parseJerryCoder(link);
-  } catch (e) { errors.push(`JerryCoder: ${e.message}`); }
-
-  // 3. Reelflow
-  try {
-    console.log('[IG] Mencoba Reelflow...');
-    return await parseReelflow(link);
-  } catch (e) { errors.push(`Reelflow: ${e.message}`); }
-
-  // 4. Native Embed
-  try {
+  // 2. Native Embed
+  try { 
     console.log('[IG] Mencoba Native Parser...');
-    return await parseNative(link);
-  } catch (e) { errors.push(`Native: ${e.message}`); }
+    return await parseNative(link); 
+  } catch (e) { 
+    errors.push(`Native: ${e.message}`); 
+  }
 
-  // 5. Savefromins
-  try {
+  // 3. Savefromins
+  try { 
     console.log('[IG] Mencoba Savefromins...');
-    return await parseSavefromins(link);
-  } catch (e) { errors.push(`Savefromins: ${e.message}`); }
+    return await parseSavefromins(link); 
+  } catch (e) { 
+    errors.push(`Savefromins: ${e.message}`); 
+  }
 
   throw new Error(errors.join(' | '));
 }
@@ -317,7 +310,7 @@ async function handleDownload(req, res, q) {
     headers: {
       'user-agent': UA,
       accept: '*/*',
-      referer: 'https://www.instagram.com/',
+      referer: target.includes('igexport') ? 'https://igexport.com/' : 'https://www.instagram.com/',
     },
     redirect: 'follow',
     signal: AbortSignal.timeout(55000),
@@ -395,6 +388,7 @@ module.exports = async (req, res) => {
       format: s.type === 'image' ? 'jpg' : 'mp4',
     }));
 
+    // Dual format: ok/media (baru) + status/data.resources (frontend lama)
     return json(res, {
       ok: true,
       status: true,
